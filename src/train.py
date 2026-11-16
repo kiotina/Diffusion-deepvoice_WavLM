@@ -15,6 +15,7 @@
 #   loss_curve.png       : loss 곡선 그림
 # ===============================
 
+import copy  # EMA 모델을 만들 때 모델을 통째로 복사한다.
 import csv  # history.csv를 쓴다.
 import math  # timestep embedding에서 log를 계산한다.
 import os  # 파일 경로를 다룬다.
@@ -46,9 +47,9 @@ sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)  # √(1−ᾱ_t) : x_t
 # 2. Forward diffusion (원본에 노이즈 섞기)
 # ===============================
 
-def select_random_timesteps(batch_size, generator=None):  # 조각마다 t를 0~T-1 중 하나씩 무작위로 뽑는다.
+def select_random_timesteps(batch_size, generator=None):  # 조각마다 t를 0 ~ TRAIN_T_MAX-1 중 하나씩 무작위로 뽑는다.
 
-    t = torch.randint(0, TIMESTEPS, (batch_size,), generator=generator)  # generator를 주면 그 난수로 뽑는다. (검증용)
+    t = torch.randint(0, TRAIN_T_MAX, (batch_size,), generator=generator)  # generator를 주면 그 난수로 뽑는다. (검증용) TRAIN_T_MAX가 기본값(1000)이면 전체 t
 
     return t.to(DEVICE)  # (B,) 정수
 
@@ -210,7 +211,7 @@ def masked_mse(pred, target, mask):  # 조각마다 mask=1인 칸에서만 (예�
 # 7. 학습 한 epoch
 # ===============================
 
-def train_one_epoch(model, loader, optimizer):
+def train_one_epoch(model, loader, optimizer, ema=None):  # ema: EMA 모델 (USE_EMA=False면 None)
 
     model.train()  # 학습 모드
     total_loss, total_count = 0.0, 0  # epoch 평균 loss를 구하기 위한 합과 개수
@@ -227,6 +228,11 @@ def train_one_epoch(model, loader, optimizer):
         loss.backward()  # gradient 계산
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)  # gradient가 너무 커지지 않게 자른다.
         optimizer.step()  # 가중치 수정
+
+        if ema is not None:  # EMA를 쓰면, 방금 수정된 가중치 쪽으로 EMA 가중치를 조금만 옮긴다.
+            with torch.no_grad():  # 이 계산은 학습(gradient)과 상관없다.
+                for p_ema, p in zip(ema.parameters(), model.parameters()):  # 같은 자리의 가중치끼리 짝짓는다.
+                    p_ema.lerp_(p, 1 - EMA_DECAY)  # ema = EMA_DECAY × ema + (1 − EMA_DECAY) × 현재 가중치
 
         total_loss += loss.item() * mel.shape[0]  # 배치 크기만큼 가중해서 더한다. (마지막 배치는 작을 수 있어서)
         total_count += mel.shape[0]
@@ -260,7 +266,7 @@ def validate(model, loader):
     all_t = torch.cat(all_t)  # (조각 수,)
 
     bin_losses = {}  # t 구간별 val loss
-    for start in range(0, TIMESTEPS, VAL_T_BIN_SIZE):  # 0, 200, 400, 600, 800
+    for start in range(0, TRAIN_T_MAX, VAL_T_BIN_SIZE):  # 0, 200, 400, 600, 800 (TRAIN_T_MAX를 줄이면 그 아래 구간만. 뽑지 않은 구간은 조각이 없어 평균을 낼 수 없다)
         end = start + VAL_T_BIN_SIZE
         in_bin = (all_t >= start) & (all_t < end)  # 이 구간에 속한 조각
         bin_losses[f"val_t{start:04d}_{end:04d}"] = all_losses[in_bin].mean().item()  # 구간 평균 loss
@@ -324,6 +330,13 @@ if __name__ == "__main__":  # python train.py로 실행했을 때만 아래가 �
     # ----- 크기 확인 -----
     model = UNet().to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+
+    ema = None  # EMA 모델 (USE_EMA=False면 쓰지 않는다)
+    if USE_EMA:
+        ema = copy.deepcopy(model).eval()  # 학습 중인 모델을 그대로 복사해서 시작한다. 항상 평가 모드
+        for p in ema.parameters():
+            p.requires_grad_(False)  # EMA 가중치는 gradient로 학습하지 않고, train_one_epoch에서 직접 옮긴다.
+    print(f"학습 t 범위: 0 ~ {TRAIN_T_MAX - 1}, EMA: {USE_EMA}")
     num_params = sum(p.numel() for p in model.parameters())  # 학습할 가중치 개수
     print(f"U-Net 가중치 수: {num_params:,}")
 
@@ -343,7 +356,7 @@ if __name__ == "__main__":  # python train.py로 실행했을 때만 아래가 �
     print(f"학습 전 val loss: {init_val_loss:.4f} (1.0 근처여야 한다)")
 
     # ----- history.csv 준비 -----
-    bin_names = [f"val_t{s:04d}_{s + VAL_T_BIN_SIZE:04d}" for s in range(0, TIMESTEPS, VAL_T_BIN_SIZE)]
+    bin_names = [f"val_t{s:04d}_{s + VAL_T_BIN_SIZE:04d}" for s in range(0, TRAIN_T_MAX, VAL_T_BIN_SIZE)]
     columns = ["epoch", "train_loss", "val_loss"] + bin_names + ["seconds"]
     history_path = os.path.join(CHECKPOINT_DIR, "history.csv")
     with open(history_path, "w", newline="", encoding="utf-8") as f:  # 새로 시작하므로 헤더부터 쓴다.
@@ -357,8 +370,9 @@ if __name__ == "__main__":  # python train.py로 실행했을 때만 아래가 �
     for epoch in range(1, MAX_EPOCHS + 1):
         start_time = time.time()
 
-        train_loss = train_one_epoch(model, train_loader, optimizer)
-        val_loss, bin_losses = validate(model, val_loader)
+        train_loss = train_one_epoch(model, train_loader, optimizer, ema)
+        eval_model = ema if ema is not None else model  # 검증하고 저장할 모델: EMA를 쓰면 EMA 모델, 아니면 학습 중인 모델
+        val_loss, bin_losses = validate(eval_model, val_loader)
         seconds = time.time() - start_time
 
         row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, **bin_losses, "seconds": seconds}
@@ -366,14 +380,14 @@ if __name__ == "__main__":  # python train.py로 실행했을 때만 아래가 �
         with open(history_path, "a", newline="", encoding="utf-8") as f:  # epoch마다 바로 적는다. (중간에 멈춰도 남도록)
             csv.writer(f).writerow([row[c] for c in columns])
 
-        save_checkpoint(os.path.join(CHECKPOINT_DIR, "last.pt"), model, epoch, val_loss)  # 매 epoch 덮어쓴다.
+        save_checkpoint(os.path.join(CHECKPOINT_DIR, "last.pt"), eval_model, epoch, val_loss)  # 매 epoch 덮어쓴다.
         if epoch % SAVE_EVERY == 0:  # SAVE_EVERY epoch마다 따로 남긴다.
-            save_checkpoint(os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pt"), model, epoch, val_loss)
+            save_checkpoint(os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pt"), eval_model, epoch, val_loss)
 
         if val_loss < best_val_loss:  # val loss가 좋아졌으면
             best_val_loss = val_loss
             epochs_without_improve = 0
-            save_checkpoint(os.path.join(CHECKPOINT_DIR, "best.pt"), model, epoch, val_loss)
+            save_checkpoint(os.path.join(CHECKPOINT_DIR, "best.pt"), eval_model, epoch, val_loss)
             mark = " ← best"
         else:  # 좋아지지 않았으면
             epochs_without_improve += 1

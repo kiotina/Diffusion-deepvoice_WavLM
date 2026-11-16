@@ -53,7 +53,7 @@ TRAIN_DATA = "2019_train"  # 학습에 쓸 데이터 (bona fide만 사용)
 DEV_DATA = "2019_dev"  # 검증·보정·임계값에 쓸 데이터 (bona fide만 사용)
 EVAL_DATA = "2019_eval"  # 최종 평가에 쓸 데이터. 평가 데이터를 바꿀 때는 이 이름만 바꾼다.
 
-RUN_NAME = "mask_silence"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
+RUN_NAME = "ema_tmax600"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
 RUN_DIR = os.path.join(OUTPUT_DIR, RUN_NAME)  # 이번 실험의 결과 폴더
 
 PREPROCESS_DIR = os.path.join(RUN_DIR, "preprocess")  # 전처리 결과를 저장할 폴더
@@ -127,6 +127,11 @@ SEED = 42  # 실험을 반복해도 같은 결과가 나오도록 난수 시작�
 VAL_SEED = 1234  # 검증용 t와 노이즈를 뽑는 전용 난수 시작값
 VAL_T_BIN_SIZE = 200  # val loss를 t 구간(0–200, 200–400, …, 800–1000)별로 나눠 기록할 때 구간 폭
 LOSS_EPS = 1e-8  # masked MSE에서 mask=1 칸이 0개일 때 0으로 나누지 않도록 막는 값
+
+# 학습 실험 스위치 (기본값이면 원래 코드와 똑같이 동작한다)
+TRAIN_T_MAX = 600  # 학습·검증에서 뽑는 t의 상한 (기본 1000). 점수에는 t ≤ 500만 쓰므로 600으로 줄여 그 구간에 집중해 볼 수 있다. VAL_T_BIN_SIZE의 배수로 둔다.
+USE_EMA = True  # True면 가중치의 이동 평균(EMA) 모델로 검증하고 저장한다. (epoch마다 가중치가 흔들리는 것을 줄인다)
+EMA_DECAY = 0.995  # EMA가 예전 가중치를 유지하는 비율. 1 epoch ≈ 81 step(2,580개 ÷ 32)이라 대략 최근 2~3 epoch의 평균이 된다.
 
 
 # ===============================
