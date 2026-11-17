@@ -53,7 +53,7 @@ TRAIN_DATA = "2019_train"  # 학습에 쓸 데이터 (bona fide만 사용)
 DEV_DATA = "2019_dev"  # 검증·보정·임계값에 쓸 데이터 (bona fide만 사용)
 EVAL_DATA = "2019_eval"  # 최종 평가에 쓸 데이터. 평가 데이터를 바꿀 때는 이 이름만 바꾼다.
 
-RUN_NAME = "wavlm_l2_codec"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
+RUN_NAME = "wavlm_l2"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
 RUN_DIR = os.path.join(OUTPUT_DIR, RUN_NAME)  # 이번 실험의 결과 폴더
 
 PREPROCESS_DIR = os.path.join(RUN_DIR, "preprocess")  # 전처리 결과를 저장할 폴더
@@ -123,7 +123,7 @@ SILENCE_DB_THRESHOLD = -40.0  # 파일에서 가장 큰 프레임보다 이만�
 # 코덱은 ffmpeg(imageio-ffmpeg, venv 안에 설치)로 실제로 인코딩했다가 다시 디코딩한다.
 # 2021의 gsm, opus는 일부러 학습에 넣지 않는다. 처음 보는 코덱에서도 좋아지는지 확인하는 시험으로 남긴다.
 # (ulaw는 alaw와 같은 표준 G.711이고, pstn 흉내의 마지막 단계에도 쓰이므로 "거의 본 코덱"으로 따로 본다)
-AUGMENT_CODEC = True  # True면 위처럼 증강한다. False면 원래대로 원본만 학습한다.
+AUGMENT_CODEC = False  # True면 위처럼 증강한다. False면 원래대로 원본만 학습한다.
 AUGMENT_CODECS = ["alaw", "g722", "pstn"]  # 학습에 쓰는 코덱. alaw: 전화(8kHz), g722: 인터넷 전화(16kHz), pstn: 일반 전화망 흉내
 CODEC_SETTINGS = {  # ffmpeg 출력 형식 이름과 코덱이 쓰는 샘플링 주파수. 두 코덱 모두 표준이라 비트레이트를 고를 수 없다. (64 kbps 고정)
     "alaw": ("alaw", 8000),  # G.711 A-law: 8kHz로 줄이고 8비트로 압축 → 4kHz 위가 사라진다.
