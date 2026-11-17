@@ -53,7 +53,7 @@ TRAIN_DATA = "2019_train"  # 학습에 쓸 데이터 (bona fide만 사용)
 DEV_DATA = "2019_dev"  # 검증·보정·임계값에 쓸 데이터 (bona fide만 사용)
 EVAL_DATA = "2019_eval"  # 최종 평가에 쓸 데이터. 평가 데이터를 바꿀 때는 이 이름만 바꾼다.
 
-RUN_NAME = "wavlm_l2"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
+RUN_NAME = "wavlm_l2_codec"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
 RUN_DIR = os.path.join(OUTPUT_DIR, RUN_NAME)  # 이번 실험의 결과 폴더
 
 PREPROCESS_DIR = os.path.join(RUN_DIR, "preprocess")  # 전처리 결과를 저장할 폴더
@@ -112,6 +112,28 @@ MIN_SEGMENT_FRAMES = 1 + int(MIN_SEGMENT_SEC * SAMPLE_RATE) // FRAME_HOP  # 1초
 
 MASK_SILENCE = True  # True면 무음 프레임도 mask=0으로 만들어 loss와 점수에서 뺀다.
 SILENCE_DB_THRESHOLD = -40.0  # 파일에서 가장 큰 프레임보다 이만큼(dB) 작으면 무음으로 본다.
+
+
+# ===============================
+# 4-1. 코덱 증강 (학습 데이터만. 진짜 음성을 실제 전화 코덱에 통과시킬 뿐 fake는 보지 않는다 → real-only 유지)
+# ===============================
+
+# 2019 real은 모두 스튜디오 녹음이라, 모델이 전화망을 거친 진짜 음성을 "처음 듣는 소리 = 가짜"로 판단했다. (2021 eval 오탐률 69~97%)
+# 그래서 train real마다 원본 1개 + 아래 코덱 중 무작위 1개를 같이 학습해 "전화 소리도 진짜일 수 있다"를 가르친다.
+# 코덱은 ffmpeg(imageio-ffmpeg, venv 안에 설치)로 실제로 인코딩했다가 다시 디코딩한다.
+# 2021의 gsm, opus는 일부러 학습에 넣지 않는다. 처음 보는 코덱에서도 좋아지는지 확인하는 시험으로 남긴다.
+# (ulaw는 alaw와 같은 표준 G.711이고, pstn 흉내의 마지막 단계에도 쓰이므로 "거의 본 코덱"으로 따로 본다)
+AUGMENT_CODEC = True  # True면 위처럼 증강한다. False면 원래대로 원본만 학습한다.
+AUGMENT_CODECS = ["alaw", "g722", "pstn"]  # 학습에 쓰는 코덱. alaw: 전화(8kHz), g722: 인터넷 전화(16kHz), pstn: 일반 전화망 흉내
+CODEC_SETTINGS = {  # ffmpeg 출력 형식 이름과 코덱이 쓰는 샘플링 주파수. 두 코덱 모두 표준이라 비트레이트를 고를 수 없다. (64 kbps 고정)
+    "alaw": ("alaw", 8000),  # G.711 A-law: 8kHz로 줄이고 8비트로 압축 → 4kHz 위가 사라진다.
+    "mulaw": ("mulaw", 8000),  # G.711 μ-law: A-law와 같은 표준의 다른 압축 곡선 (pstn 흉내의 마지막 단계에만 쓴다)
+    "g722": ("g722", 16000),  # G.722: 16kHz 그대로, 대역을 둘로 나눠 압축 → 7kHz 근처까지 남는다.
+}
+# pstn 흉내: 실제 2021 pstn은 "스마트폰 → 일반 전화망(코덱 모름) → μ-law로 녹음"이다. 일반 전화망이 통과시키는 대역(약 300~3400Hz)만 남긴 뒤 μ-law에 통과시킨다.
+# 대역 경계를 하나로 못 박지 않고 파일마다 아래 범위에서 무작위로 고른다. (특정 설정만 외우지 않도록)
+PSTN_LOW_HZ_RANGE = (200, 400)  # 낮은 쪽 경계 (Hz)
+PSTN_HIGH_HZ_RANGE = (3000, 3600)  # 높은 쪽 경계 (Hz)
 
 
 # ===============================
