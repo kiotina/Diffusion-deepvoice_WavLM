@@ -15,6 +15,7 @@
 #   loss_curve.png       : loss 곡선 그림
 # ===============================
 
+import copy  # EMA 모델을 만들 때 모델을 통째로 복사한다.
 import csv  # history.csv를 쓴다.
 import math  # timestep embedding에서 log를 계산한다.
 import os  # 파일 경로를 다룬다.
@@ -46,9 +47,9 @@ sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)  # √(1−ᾱ_t) : x_t
 # 2. Forward diffusion (원본에 노이즈 섞기)
 # ===============================
 
-def select_random_timesteps(batch_size, generator=None):  # 조각마다 t를 0~T-1 중 하나씩 무작위로 뽑는다.
+def select_random_timesteps(batch_size, generator=None):  # 조각마다 t를 0 ~ TRAIN_T_MAX-1 중 하나씩 무작위로 뽑는다.
 
-    t = torch.randint(0, TIMESTEPS, (batch_size,), generator=generator)  # generator를 주면 그 난수로 뽑는다. (검증용)
+    t = torch.randint(0, TRAIN_T_MAX, (batch_size,), generator=generator)  # generator를 주면 그 난수로 뽑는다. (검증용) TRAIN_T_MAX가 기본값(1000)이면 전체 t
 
     return t.to(DEVICE)  # (B,) 정수
 
@@ -160,6 +161,92 @@ class UNet(nn.Module):  # 입력 (B, 1, 80, 126) → 예측 노이즈 (B, 1, 80,
         return out[..., :num_frames]  # 채웠던 오른쪽을 잘라 다시 (B, 1, 80, 126)
 
 
+# WavLM 특징용 1D U-Net
+# Mel은 세로(주파수)에 순서가 있어서 위아래 이웃 칸을 함께 보는 2D conv가 맞다.
+# WavLM의 768차원은 순서가 없는 숫자 묶음이라, 위아래로 conv를 미는 것은 의미가 없다.
+# 그래서 768개를 "채널"로 보고 시간 방향으로만 conv를 민다. (사진 대신 768줄짜리 시간 신호로 본다)
+# 구조(Encoder 2번 → Bottleneck → Decoder 2번 + skip)와 ResBlock 순서는 위 2D U-Net과 같다.
+
+class ResBlock1d(nn.Module):  # ResBlock과 같고 Conv2d → Conv1d만 다르다.
+
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_ch, out_ch, kernel_size=3, padding=1)  # 시간 방향으로 이웃 3프레임(60ms)을 본다.
+        self.norm = nn.GroupNorm(GROUP_NORM_GROUPS, out_ch)
+        self.act = nn.SiLU()
+        self.time_proj = nn.Linear(TIME_EMBEDDING_DIM, out_ch)
+        self.conv2 = nn.Conv1d(out_ch, out_ch, kernel_size=3, padding=1)
+
+        if in_ch != out_ch:
+            self.skip = nn.Conv1d(in_ch, out_ch, kernel_size=1)
+        else:
+            self.skip = nn.Identity()
+
+    def forward(self, x, t_emb):  # x: (B, in_ch, 프레임 수), t_emb: (B, TIME_EMBEDDING_DIM)
+
+        h = self.conv1(x)  # (B, out_ch, 프레임 수)
+        h = self.act(self.norm(h))
+        h = h + self.time_proj(t_emb)[:, :, None]  # (B, out_ch) → (B, out_ch, 1)
+        h = self.conv2(h)
+
+        return h + self.skip(x)
+
+
+class UNet1d(nn.Module):  # 입력 (B, 1, 768, 101) → 예측 노이즈 (B, 1, 768, 101). 겉모양은 2D U-Net과 같게 맞춘다.
+
+    def __init__(self):
+        super().__init__()
+        ch1, ch2 = UNET1D_CHANNELS, UNET1D_CHANNELS * 2  # 256, 512
+
+        self.time_mlp = nn.Sequential(
+            nn.Linear(TIME_EMBEDDING_DIM, TIME_EMBEDDING_DIM),
+            nn.SiLU(),
+            nn.Linear(TIME_EMBEDDING_DIM, TIME_EMBEDDING_DIM),
+        )
+
+        self.conv_in = nn.Conv1d(N_BINS, ch1, kernel_size=3, padding=1)  # 768채널 → 256채널
+
+        self.enc1 = ResBlock1d(ch1, ch1)  # 104프레임, 256채널
+        self.down1 = nn.Conv1d(ch1, ch1, kernel_size=3, stride=2, padding=1)  # 104 → 52
+        self.enc2 = ResBlock1d(ch1, ch2)  # 52프레임, 512채널
+        self.down2 = nn.Conv1d(ch2, ch2, kernel_size=3, stride=2, padding=1)  # 52 → 26
+
+        self.mid = ResBlock1d(ch2, ch2)  # 26프레임, 512채널
+
+        self.up2 = nn.Upsample(scale_factor=2, mode="nearest")  # 26 → 52
+        self.dec2 = ResBlock1d(ch2 + ch2, ch2)
+        self.up1 = nn.Upsample(scale_factor=2, mode="nearest")  # 52 → 104
+        self.dec1 = ResBlock1d(ch2 + ch1, ch1)
+
+        self.conv_out = nn.Conv1d(ch1, N_BINS, kernel_size=3, padding=1)  # 256채널 → 768채널 노이즈
+
+    def forward(self, x, t):  # x: (B, 1, 768, 101), t: (B,)
+
+        x = x[:, 0]  # (B, 768, 101): 2D용 채널 1칸을 떼어 768을 채널로 쓴다.
+        num_frames = x.shape[-1]
+        x = F.pad(x, (0, UNET_FRAMES - num_frames))  # (B, 768, 104)
+
+        t_emb = self.time_mlp(get_timestep_embedding(t, TIME_EMBEDDING_DIM))
+
+        h = self.conv_in(x)  # (B, 256, 104)
+        h1 = self.enc1(h, t_emb)  # (B, 256, 104)
+        h2 = self.enc2(self.down1(h1), t_emb)  # (B, 512, 52)
+        h = self.mid(self.down2(h2), t_emb)  # (B, 512, 26)
+
+        h = self.dec2(torch.cat([self.up2(h), h2], dim=1), t_emb)  # (B, 512, 52)
+        h = self.dec1(torch.cat([self.up1(h), h1], dim=1), t_emb)  # (B, 256, 104)
+        out = self.conv_out(h)  # (B, 768, 104)
+
+        return out[:, None, :, :num_frames]  # (B, 1, 768, 101): 입력과 같은 모양으로 돌려준다.
+
+
+def make_model():  # FEATURE_TYPE에 맞는 U-Net을 만든다. (train.py와 evaluate.py가 같이 쓴다)
+
+    if FEATURE_TYPE == "wavlm":
+        return UNet1d()  # WavLM 특징 → 1D U-Net
+    return UNet()  # Mel, 스펙트로그램 → 2D U-Net
+
+
 # ===============================
 # 5. 학습 데이터: random crop Dataset
 # ===============================
@@ -210,7 +297,7 @@ def masked_mse(pred, target, mask):  # 조각마다 mask=1인 칸에서만 (예�
 # 7. 학습 한 epoch
 # ===============================
 
-def train_one_epoch(model, loader, optimizer):
+def train_one_epoch(model, loader, optimizer, ema=None):  # ema: EMA 모델 (USE_EMA=False면 None)
 
     model.train()  # 학습 모드
     total_loss, total_count = 0.0, 0  # epoch 평균 loss를 구하기 위한 합과 개수
@@ -227,6 +314,11 @@ def train_one_epoch(model, loader, optimizer):
         loss.backward()  # gradient 계산
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)  # gradient가 너무 커지지 않게 자른다.
         optimizer.step()  # 가중치 수정
+
+        if ema is not None:  # EMA를 쓰면, 방금 수정된 가중치 쪽으로 EMA 가중치를 조금만 옮긴다.
+            with torch.no_grad():  # 이 계산은 학습(gradient)과 상관없다.
+                for p_ema, p in zip(ema.parameters(), model.parameters()):  # 같은 자리의 가중치끼리 짝짓는다.
+                    p_ema.lerp_(p, 1 - EMA_DECAY)  # ema = EMA_DECAY × ema + (1 − EMA_DECAY) × 현재 가중치
 
         total_loss += loss.item() * mel.shape[0]  # 배치 크기만큼 가중해서 더한다. (마지막 배치는 작을 수 있어서)
         total_count += mel.shape[0]
@@ -260,7 +352,7 @@ def validate(model, loader):
     all_t = torch.cat(all_t)  # (조각 수,)
 
     bin_losses = {}  # t 구간별 val loss
-    for start in range(0, TIMESTEPS, VAL_T_BIN_SIZE):  # 0, 200, 400, 600, 800
+    for start in range(0, TRAIN_T_MAX, VAL_T_BIN_SIZE):  # 0, 200, 400, 600, 800 (TRAIN_T_MAX를 줄이면 그 아래 구간만. 뽑지 않은 구간은 조각이 없어 평균을 낼 수 없다)
         end = start + VAL_T_BIN_SIZE
         in_bin = (all_t >= start) & (all_t < end)  # 이 구간에 속한 조각
         bin_losses[f"val_t{start:04d}_{end:04d}"] = all_losses[in_bin].mean().item()  # 구간 평균 loss
@@ -322,8 +414,15 @@ if __name__ == "__main__":  # python train.py로 실행했을 때만 아래가 �
     print(f"train 파일 {len(train_data['mels'])}개, val 조각 {val_data['mels'].shape[0]}개")
 
     # ----- 크기 확인 -----
-    model = UNet().to(DEVICE)
+    model = make_model().to(DEVICE)  # FEATURE_TYPE에 맞는 U-Net (WavLM이면 1D)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+
+    ema = None  # EMA 모델 (USE_EMA=False면 쓰지 않는다)
+    if USE_EMA:
+        ema = copy.deepcopy(model).eval()  # 학습 중인 모델을 그대로 복사해서 시작한다. 항상 평가 모드
+        for p in ema.parameters():
+            p.requires_grad_(False)  # EMA 가중치는 gradient로 학습하지 않고, train_one_epoch에서 직접 옮긴다.
+    print(f"학습 t 범위: 0 ~ {TRAIN_T_MAX - 1}, EMA: {USE_EMA}")
     num_params = sum(p.numel() for p in model.parameters())  # 학습할 가중치 개수
     print(f"U-Net 가중치 수: {num_params:,}")
 
@@ -343,7 +442,7 @@ if __name__ == "__main__":  # python train.py로 실행했을 때만 아래가 �
     print(f"학습 전 val loss: {init_val_loss:.4f} (1.0 근처여야 한다)")
 
     # ----- history.csv 준비 -----
-    bin_names = [f"val_t{s:04d}_{s + VAL_T_BIN_SIZE:04d}" for s in range(0, TIMESTEPS, VAL_T_BIN_SIZE)]
+    bin_names = [f"val_t{s:04d}_{s + VAL_T_BIN_SIZE:04d}" for s in range(0, TRAIN_T_MAX, VAL_T_BIN_SIZE)]
     columns = ["epoch", "train_loss", "val_loss"] + bin_names + ["seconds"]
     history_path = os.path.join(CHECKPOINT_DIR, "history.csv")
     with open(history_path, "w", newline="", encoding="utf-8") as f:  # 새로 시작하므로 헤더부터 쓴다.
@@ -357,8 +456,9 @@ if __name__ == "__main__":  # python train.py로 실행했을 때만 아래가 �
     for epoch in range(1, MAX_EPOCHS + 1):
         start_time = time.time()
 
-        train_loss = train_one_epoch(model, train_loader, optimizer)
-        val_loss, bin_losses = validate(model, val_loader)
+        train_loss = train_one_epoch(model, train_loader, optimizer, ema)
+        eval_model = ema if ema is not None else model  # 검증하고 저장할 모델: EMA를 쓰면 EMA 모델, 아니면 학습 중인 모델
+        val_loss, bin_losses = validate(eval_model, val_loader)
         seconds = time.time() - start_time
 
         row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, **bin_losses, "seconds": seconds}
@@ -366,14 +466,14 @@ if __name__ == "__main__":  # python train.py로 실행했을 때만 아래가 �
         with open(history_path, "a", newline="", encoding="utf-8") as f:  # epoch마다 바로 적는다. (중간에 멈춰도 남도록)
             csv.writer(f).writerow([row[c] for c in columns])
 
-        save_checkpoint(os.path.join(CHECKPOINT_DIR, "last.pt"), model, epoch, val_loss)  # 매 epoch 덮어쓴다.
+        save_checkpoint(os.path.join(CHECKPOINT_DIR, "last.pt"), eval_model, epoch, val_loss)  # 매 epoch 덮어쓴다.
         if epoch % SAVE_EVERY == 0:  # SAVE_EVERY epoch마다 따로 남긴다.
-            save_checkpoint(os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pt"), model, epoch, val_loss)
+            save_checkpoint(os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pt"), eval_model, epoch, val_loss)
 
         if val_loss < best_val_loss:  # val loss가 좋아졌으면
             best_val_loss = val_loss
             epochs_without_improve = 0
-            save_checkpoint(os.path.join(CHECKPOINT_DIR, "best.pt"), model, epoch, val_loss)
+            save_checkpoint(os.path.join(CHECKPOINT_DIR, "best.pt"), eval_model, epoch, val_loss)
             mark = " ← best"
         else:  # 좋아지지 않았으면
             epochs_without_improve += 1

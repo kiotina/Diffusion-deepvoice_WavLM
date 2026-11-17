@@ -1,24 +1,32 @@
 # ===============================
 # preprocess.py
 # 음성 파일을 U-Net에 넣을 수 있는 log-Mel로 바꿔서 저장한다.
+# FEATURE_TYPE = "wavlm"이면 log-Mel 대신 WavLM 특징 (768, 프레임 수)을 같은 방식으로 저장한다.
+# (파일·변수 이름은 처음 만든 대로 mel이라고 두었다. "모델 입력"이라는 뜻으로 읽으면 된다.)
 #
 # 만드는 파일 (outputs/preprocess 폴더)
 #   mel_stats.pt         : train real로 계산한 Mel 칸별 평균·표준편차
 #   train_full_mels.pt   : train real 파일마다 전체 길이의 log-Mel (학습 때 무작위로 2초씩 자른다)
 #   val_mels.pt          : dev real을 고정 2초 조각으로 자른 log-Mel (검증·임계값용)
 #   mel_example.png      : 확인용 Mel 그림
+#   codec_examples/      : 같은 문장을 원본과 학습 코덱별로 저장한 wav (AUGMENT_CODEC = True일 때, 직접 들어 보기용)
 #
 # 이 파일의 함수(load_audio, wave_to_logmel 등)는 evaluate.py에서도 가져다 쓴다.
 # ===============================
 
 import os  # 파일 경로를 다룬다.
+import subprocess  # ffmpeg 프로그램을 실행한다. (코덱 증강)
 
+import imageio_ffmpeg  # venv 안에 설치된 ffmpeg 실행 파일의 위치를 알려 준다.
 import librosa  # 음성 파일을 읽고 Mel-spectrogram을 계산한다.
 import matplotlib  # 그림을 저장한다.
 matplotlib.use("Agg")  # 창을 띄우지 않고 파일로만 저장한다.
 import matplotlib.pyplot as plt  # 그림을 그린다.
 import numpy as np  # 숫자 배열을 계산한다.
+import soundfile as sf  # 코덱 증강 예시를 wav 파일로 저장한다. (직접 들어 보기용)
 import torch  # 결과를 PyTorch 텐서로 저장한다.
+from scipy.signal import butter, sosfilt  # pstn 흉내: 일반 전화망처럼 일부 대역만 통과시키는 필터
+from transformers import WavLMModel  # 미리 학습된 WavLM을 불러온다. (FEATURE_TYPE = "wavlm"일 때만 쓴다)
 
 from config import *  # config.py의 모든 설정값을 가져온다.
 
@@ -71,30 +79,61 @@ def load_audio(path):  # 음성 파일 하나를 읽는다.
     return wave.astype(np.float32)  # 32비트 실수로 돌려준다.
 
 
-def wave_to_logmel(wave):  # waveform → log-Mel (80, 프레임 수)
+def wave_to_logmel(wave):  # waveform → log-Mel 또는 log 스펙트로그램 (N_BINS, 프레임 수)
 
-    mel = librosa.feature.melspectrogram(  # STFT → 파워 → Mel 필터를 한 번에 계산한다.
-        y=wave,
-        sr=SAMPLE_RATE,
-        n_fft=N_FFT,
-        win_length=WIN_LENGTH,
-        hop_length=HOP_LENGTH,
-        n_mels=N_MELS,
-        power=2.0,  # 크기의 제곱(파워)을 사용한다.
-    )
+    if FEATURE_TYPE == "mel":  # Mel을 쓰는 경우 (원래 방식)
+        mel = librosa.feature.melspectrogram(  # STFT → 파워 → Mel 필터를 한 번에 계산한다.
+            y=wave,
+            sr=SAMPLE_RATE,
+            n_fft=N_FFT,
+            win_length=WIN_LENGTH,
+            hop_length=HOP_LENGTH,
+            n_mels=N_MELS,
+            power=2.0,  # 크기의 제곱(파워)을 사용한다.
+        )
+    else:  # Mel 필터를 거치지 않는 경우: STFT 결과를 그대로 쓴다.
+        stft = librosa.stft(  # 프레임마다 주파수 성분을 계산한다. (257, 프레임 수): 0Hz ~ 8000Hz를 31.25Hz 간격으로
+            y=wave,
+            n_fft=N_FFT,
+            win_length=WIN_LENGTH,
+            hop_length=HOP_LENGTH,  # Mel과 같은 설정이라 프레임 수도 같다.
+        )
+        mel = np.abs(stft) ** 2  # 크기의 제곱(파워). Mel 방식의 power=2.0과 같다. (변수 이름은 아래 코드와 맞추려고 mel로 둔다)
+        mel = mel[:N_BINS]  # 맨 위 한 칸(8000Hz)을 버려 256칸으로 맞춘다.
+    # Mel은 이 파워 스펙트로그램의 여러 칸을 묶어 80칸으로 줄인 것이다. 묶지 않으면 모든 주파수를 같은 간격으로 본다.
 
     logmel = np.log(mel + LOG_EPS)  # 값의 차이가 너무 크지 않도록 log로 압축한다.
 
-    return logmel.astype(np.float32)  # (80, 프레임 수)
+    return logmel.astype(np.float32)  # (N_BINS, 프레임 수)
+
+
+WAVLM = {}  # 불러온 WavLM을 담아 둘 곳. 파일마다 다시 불러오지 않도록 처음 한 번만 채운다.
+
+
+def wave_to_wavlm(wave):  # waveform → WavLM 특징 (768, 프레임 수)
+
+    if "model" not in WAVLM:  # 처음 부를 때만
+        WAVLM["model"] = WavLMModel.from_pretrained(WAVLM_MODEL_NAME).to(DEVICE).eval()  # 미리 학습된 가중치를 받아 GPU에 올린다. (학습하지 않고 그대로 쓴다)
+        print(f"WavLM 불러옴: {WAVLM_MODEL_NAME}, {WAVLM_LAYER}층 사용")
+
+    x = torch.from_numpy(wave)[None].to(DEVICE)  # (1, 샘플 수). wavlm-base-plus는 진폭 정규화 없이 waveform을 그대로 받는다.
+    with torch.no_grad():  # WavLM은 학습하지 않는다.
+        out = WAVLM["model"](x, output_hidden_states=True)  # 모든 층의 출력을 받는다.
+    hidden = out.hidden_states[WAVLM_LAYER][0]  # (프레임 수, 768): 고른 층의 출력. 20ms마다 768개 숫자
+
+    return hidden.T.cpu().numpy().astype(np.float32)  # (768, 프레임 수): Mel과 같은 (세로 칸, 프레임) 모양으로 맞춘다.
 
 
 def make_silence_mask(wave, num_frames):  # 무음 프레임은 0, 소리 있는 프레임은 1
 
-    rms = librosa.feature.rms(  # 프레임마다 소리 크기(RMS 에너지)를 계산한다.
-        y=wave,
-        frame_length=N_FFT,
-        hop_length=HOP_LENGTH,  # Mel과 같은 간격으로 계산해야 프레임이 맞는다.
-    )[0]
+    if FEATURE_TYPE == "wavlm":  # WavLM 프레임 i는 샘플 [320i, 320i + 400) 구간을 본다.
+        rms = librosa.feature.rms(y=wave, frame_length=WIN_LENGTH, hop_length=WAVLM_HOP, center=False)[0]  # 같은 구간으로 소리 크기를 재야 프레임이 맞는다. (WIN_LENGTH = 400샘플)
+    else:
+        rms = librosa.feature.rms(  # 프레임마다 소리 크기(RMS 에너지)를 계산한다.
+            y=wave,
+            frame_length=N_FFT,
+            hop_length=HOP_LENGTH,  # Mel과 같은 간격으로 계산해야 프레임이 맞는다.
+        )[0]
 
     rms_db = librosa.amplitude_to_db(rms, ref=np.max)  # 가장 큰 프레임을 0dB로 놓고 dB로 바꾼다.
     silence_mask = (rms_db > SILENCE_DB_THRESHOLD).astype(np.float32)  # 기준보다 크면 1(소리 있음)
@@ -120,16 +159,92 @@ def normalize_logmel(logmel, stats):  # train 통계로 정규화한다. (평균
     return (logmel - mean) / std  # 모든 파일에 같은 통계를 쓴다. (파일별 정규화는 하지 않는다)
 
 
-def file_to_logmel(path, stats=None):  # 파일 하나 → (정규화된) log-Mel과 mask
+def wave_to_input(wave, stats=None):  # waveform → 모델 입력과 mask (코덱 증강한 소리도 이 함수로 똑같이 처리한다)
 
-    wave = load_audio(path)  # 음성을 읽는다.
-    logmel = wave_to_logmel(wave)  # log-Mel로 바꾼다.
-    mask = make_frame_mask(wave, logmel.shape[1])  # 프레임별 mask를 만든다.
+    if FEATURE_TYPE == "wavlm":  # WavLM 특징을 쓰는 경우
+        logmel = wave_to_wavlm(wave)  # (768, 프레임 수). 아래 mask·정규화는 Mel과 똑같이 한다.
+    else:
+        logmel = wave_to_logmel(wave)  # log-Mel로 바꾼다.
+    mask = make_frame_mask(wave, logmel.shape[1])  # 프레임별 mask를 만든다. (코덱을 거친 소리면 그 소리 기준으로. 평가 때와 같은 조건)
 
     if stats is not None:  # 통계가 주어지면
         logmel = normalize_logmel(logmel, stats)  # 정규화한다.
 
     return logmel, mask  # (80, 프레임 수), (프레임 수,)
+
+
+def file_to_logmel(path, stats=None):  # 파일 하나 → (정규화된) log-Mel과 mask
+
+    return wave_to_input(load_audio(path), stats)  # 음성을 읽어서 모델 입력으로 바꾼다.
+
+
+# ===============================
+# 2-1. 코덱 증강 (학습 데이터에만 쓴다)
+# ===============================
+
+# 진짜 음성을 실제 전화 코덱에 통과시킨다. ffmpeg로 인코딩(압축)했다가 다시 디코딩(복원)하면, 코덱이 지운 정보는 돌아오지 않는다.
+#   예: alaw는 8kHz로 보내므로 4kHz 위의 높은 소리가 사라지고, 8비트로 압축하면서 작은 잡음이 생긴다.
+# 마지막에는 16kHz로 되돌려 모델 입력 조건(샘플링, 길이)을 원래와 똑같이 맞춘다.
+
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()  # venv 안의 ffmpeg 실행 파일 경로
+
+
+def run_ffmpeg(args, data):  # ffmpeg에 소리 데이터(bytes)를 넣고 결과(bytes)를 받는다. 파일을 따로 만들지 않는다.
+
+    result = subprocess.run(
+        [FFMPEG, "-hide_banner", "-loglevel", "error", *args],  # 진행 메시지는 숨기고 오류만 보인다.
+        input=data,  # pipe:0 = 이 데이터를 입력으로
+        stdout=subprocess.PIPE,  # pipe:1 = 결과를 돌려받는다.
+        stderr=subprocess.PIPE,
+        check=True,  # ffmpeg가 실패하면 바로 오류를 낸다. (조용히 빈 소리로 넘어가지 않도록)
+    )
+
+    return result.stdout
+
+
+def apply_codec(wave, codec):  # codec: CODEC_SETTINGS의 이름 ("alaw", "mulaw", "g722")
+
+    codec_format, codec_rate = CODEC_SETTINGS[codec]  # ffmpeg 형식 이름, 코덱의 샘플링 주파수
+    pcm = np.clip(wave, -1.0, 1.0).astype(np.float32).tobytes()  # 16kHz 32비트 실수 소리를 bytes로
+
+    encoded = run_ffmpeg(  # 인코딩: 16kHz 소리 → 코덱 샘플링으로 바꾸고 → 코덱으로 압축
+        ["-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "1", "-i", "pipe:0", "-ar", str(codec_rate), "-f", codec_format, "pipe:1"],
+        pcm,
+    )
+    input_format = ["-f", codec_format]  # 압축된 데이터가 어떤 코덱인지
+    if codec_format != "g722":  # alaw·mulaw 데이터에는 정보 머리말이 없어서 샘플링 주파수와 채널 수를 직접 알려 줘야 한다. (g722는 알아서 16kHz로 읽는다)
+        input_format += ["-ar", str(codec_rate), "-ac", "1"]
+    decoded = run_ffmpeg(  # 디코딩: 압축된 소리 → 풀고 → 다시 16kHz 32비트 실수로
+        [*input_format, "-i", "pipe:0", "-ar", str(SAMPLE_RATE), "-f", "f32le", "pipe:1"],
+        encoded,
+    )
+
+    back = np.frombuffer(decoded, dtype=np.float32).copy()  # bytes → 숫자 배열 (copy: 읽기 전용 배열을 고칠 수 있는 배열로)
+    return librosa.util.fix_length(back, size=len(wave))  # 길이를 원래와 똑같이 맞춘다. (코덱 지연·리샘플링으로 몇 샘플 달라질 수 있다)
+
+
+def apply_augment(wave, augment, rng):  # augment: AUGMENT_CODECS 중 하나. rng: pstn 대역 경계를 고를 난수
+
+    if augment != "pstn":  # alaw, g722: 코덱에 그대로 통과시킨다.
+        return apply_codec(wave, augment)
+
+    # pstn 흉내: 일반 전화망이 통과시키는 대역만 남기고 → μ-law로 녹음한다. (2021 pstn 조건의 마지막 단계가 μ-law)
+    low_hz = rng.uniform(*PSTN_LOW_HZ_RANGE)  # 낮은 쪽 경계를 파일마다 조금씩 다르게
+    high_hz = rng.uniform(*PSTN_HIGH_HZ_RANGE)  # 높은 쪽 경계도
+    bandpass = butter(4, (low_hz, high_hz), btype="bandpass", fs=SAMPLE_RATE, output="sos")  # 그 대역만 통과시키는 필터
+    wave = sosfilt(bandpass, wave).astype(np.float32)  # 대역 밖의 소리를 줄인다.
+
+    return apply_codec(wave, "mulaw")
+
+
+def save_codec_examples(path, out_dir):  # 같은 파일을 원본과 학습 코덱별로 저장한다. (직접 들어 보고 확인하기용)
+
+    os.makedirs(out_dir, exist_ok=True)
+    wave = load_audio(path)
+    rng = np.random.default_rng(SEED)  # pstn 예시의 대역 경계용
+    sf.write(os.path.join(out_dir, "original.wav"), wave, SAMPLE_RATE)
+    for augment in AUGMENT_CODECS:
+        sf.write(os.path.join(out_dir, f"{augment}.wav"), apply_augment(wave, augment, rng), SAMPLE_RATE)
 
 
 # ===============================
@@ -174,8 +289,8 @@ def cut_segments(logmel, mask, hop_frames):  # 정규화된 log-Mel을 2초 조�
 
 def compute_stats(raw_logmels, masks):  # Mel 칸마다 평균과 표준편차를 구한다.
 
-    total_sum = np.zeros(N_MELS, dtype=np.float64)  # 칸별 합
-    total_sq_sum = np.zeros(N_MELS, dtype=np.float64)  # 칸별 제곱합
+    total_sum = np.zeros(N_BINS, dtype=np.float64)  # 칸별 합
+    total_sq_sum = np.zeros(N_BINS, dtype=np.float64)  # 칸별 제곱합
     total_count = 0  # 사용한 프레임 수
 
     for logmel, mask in zip(raw_logmels, masks):  # 파일마다
@@ -211,15 +326,28 @@ def build_train(stats_out_path, train_out_path):  # train real → 통계 + 파�
     print(f"[train] real 파일 {len(items)}개 처리 시작")
 
     raw_logmels, masks, file_ids = [], [], []  # 정규화 전 Mel, mask, 파일 ID
+    rng = np.random.default_rng(SEED)  # 파일마다 어떤 코덱을 입힐지(와 pstn 대역 경계를) 고르는 난수. 언제 돌려도 같은 선택
 
     for i, item in enumerate(items):  # 파일마다
-        logmel, mask = file_to_logmel(item["path"])  # 정규화 전 log-Mel과 mask
+        wave = load_audio(item["path"])  # 음성을 한 번만 읽어서 원본과 증강본에 같이 쓴다.
+        logmel, mask = wave_to_input(wave)  # 정규화 전 log-Mel과 mask
         raw_logmels.append(logmel)
         masks.append(mask)
         file_ids.append(item["file_id"])
 
+        if AUGMENT_CODEC:  # 코덱 증강: 같은 파일을 코덱에 통과시킨 소리로 하나 더 만든다.
+            augment = AUGMENT_CODECS[rng.integers(len(AUGMENT_CODECS))]  # 학습 코덱 중 하나를 무작위로
+            logmel, mask = wave_to_input(apply_augment(wave, augment, rng))
+            raw_logmels.append(logmel)
+            masks.append(mask)
+            file_ids.append(f"{item['file_id']}@{augment}")  # 예: LA_T_1138215@alaw (어떤 코덱을 입혔는지 남긴다)
+
         if (i + 1) % 500 == 0:  # 500개마다 진행 상황을 출력한다.
             print(f"  {i + 1}/{len(items)}")
+
+    if AUGMENT_CODEC:  # 코덱이 고르게 섞였는지 확인한다.
+        counts = {augment: sum(f.endswith("@" + augment) for f in file_ids) for augment in AUGMENT_CODECS}
+        print(f"[train] 코덱 증강: 원본 {len(items)}개 + 증강 {sum(counts.values())}개 {counts}")
 
     stats = compute_stats(raw_logmels, masks)  # train real로만 통계를 계산한다.
     torch.save({"mean": torch.from_numpy(stats["mean"]), "std": torch.from_numpy(stats["std"])}, stats_out_path)
@@ -232,7 +360,7 @@ def build_train(stats_out_path, train_out_path):  # train real → 통계 + 파�
     }, train_out_path)
 
     total_frames = sum(m.shape[1] for m in mels)  # 전체 프레임 수
-    print(f"[train] 저장 완료: 파일 {len(mels)}개, 전체 {total_frames}프레임 (약 {total_frames * HOP_LENGTH / SAMPLE_RATE / 60:.1f}분)")
+    print(f"[train] 저장 완료: 파일 {len(mels)}개, 전체 {total_frames}프레임 (약 {total_frames * FRAME_HOP / SAMPLE_RATE / 60:.1f}분)")
 
     return stats, mels[0], torch.from_numpy(masks[0])  # 확인용 그림에 쓸 첫 파일도 돌려준다.
 
@@ -297,6 +425,13 @@ if __name__ == "__main__":  # python preprocess.py로 실행했을 때만 아래
     print(f"  학습 데이터: {TRAIN_DATA}, 검증 데이터: {DEV_DATA}")
     print(f"  2초 조각 = {SEGMENT_FRAMES}프레임, 1초 = {MIN_SEGMENT_FRAMES}프레임")
     print(f"  무음 mask: {MASK_SILENCE}, 파일 개수 제한: {FILE_LIMIT}")
+    print(f"  입력 종류: {FEATURE_TYPE}, 세로 칸 수: {N_BINS}, 프레임 간격: {FRAME_HOP}샘플")
+    print(f"  코덱 증강: {AUGMENT_CODEC} {AUGMENT_CODECS if AUGMENT_CODEC else ''}")
+
+    if AUGMENT_CODEC:  # 증강한 소리를 직접 들어 볼 수 있게 예시를 먼저 저장한다. (ffmpeg가 제대로 동작하는지도 여기서 먼저 확인된다)
+        example_dir = os.path.join(PREPROCESS_DIR, "codec_examples")
+        save_codec_examples(select_bonafide(TRAIN_DATA)[0]["path"], example_dir)
+        print(f"  코덱 예시 저장: {example_dir}")
 
     stats, example_mel, example_mask = build_train(
         stats_out_path=os.path.join(PREPROCESS_DIR, "mel_stats.pt"),
