@@ -161,6 +161,92 @@ class UNet(nn.Module):  # 입력 (B, 1, 80, 126) → 예측 노이즈 (B, 1, 80,
         return out[..., :num_frames]  # 채웠던 오른쪽을 잘라 다시 (B, 1, 80, 126)
 
 
+# WavLM 특징용 1D U-Net
+# Mel은 세로(주파수)에 순서가 있어서 위아래 이웃 칸을 함께 보는 2D conv가 맞다.
+# WavLM의 768차원은 순서가 없는 숫자 묶음이라, 위아래로 conv를 미는 것은 의미가 없다.
+# 그래서 768개를 "채널"로 보고 시간 방향으로만 conv를 민다. (사진 대신 768줄짜리 시간 신호로 본다)
+# 구조(Encoder 2번 → Bottleneck → Decoder 2번 + skip)와 ResBlock 순서는 위 2D U-Net과 같다.
+
+class ResBlock1d(nn.Module):  # ResBlock과 같고 Conv2d → Conv1d만 다르다.
+
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_ch, out_ch, kernel_size=3, padding=1)  # 시간 방향으로 이웃 3프레임(60ms)을 본다.
+        self.norm = nn.GroupNorm(GROUP_NORM_GROUPS, out_ch)
+        self.act = nn.SiLU()
+        self.time_proj = nn.Linear(TIME_EMBEDDING_DIM, out_ch)
+        self.conv2 = nn.Conv1d(out_ch, out_ch, kernel_size=3, padding=1)
+
+        if in_ch != out_ch:
+            self.skip = nn.Conv1d(in_ch, out_ch, kernel_size=1)
+        else:
+            self.skip = nn.Identity()
+
+    def forward(self, x, t_emb):  # x: (B, in_ch, 프레임 수), t_emb: (B, TIME_EMBEDDING_DIM)
+
+        h = self.conv1(x)  # (B, out_ch, 프레임 수)
+        h = self.act(self.norm(h))
+        h = h + self.time_proj(t_emb)[:, :, None]  # (B, out_ch) → (B, out_ch, 1)
+        h = self.conv2(h)
+
+        return h + self.skip(x)
+
+
+class UNet1d(nn.Module):  # 입력 (B, 1, 768, 101) → 예측 노이즈 (B, 1, 768, 101). 겉모양은 2D U-Net과 같게 맞춘다.
+
+    def __init__(self):
+        super().__init__()
+        ch1, ch2 = UNET1D_CHANNELS, UNET1D_CHANNELS * 2  # 256, 512
+
+        self.time_mlp = nn.Sequential(
+            nn.Linear(TIME_EMBEDDING_DIM, TIME_EMBEDDING_DIM),
+            nn.SiLU(),
+            nn.Linear(TIME_EMBEDDING_DIM, TIME_EMBEDDING_DIM),
+        )
+
+        self.conv_in = nn.Conv1d(N_BINS, ch1, kernel_size=3, padding=1)  # 768채널 → 256채널
+
+        self.enc1 = ResBlock1d(ch1, ch1)  # 104프레임, 256채널
+        self.down1 = nn.Conv1d(ch1, ch1, kernel_size=3, stride=2, padding=1)  # 104 → 52
+        self.enc2 = ResBlock1d(ch1, ch2)  # 52프레임, 512채널
+        self.down2 = nn.Conv1d(ch2, ch2, kernel_size=3, stride=2, padding=1)  # 52 → 26
+
+        self.mid = ResBlock1d(ch2, ch2)  # 26프레임, 512채널
+
+        self.up2 = nn.Upsample(scale_factor=2, mode="nearest")  # 26 → 52
+        self.dec2 = ResBlock1d(ch2 + ch2, ch2)
+        self.up1 = nn.Upsample(scale_factor=2, mode="nearest")  # 52 → 104
+        self.dec1 = ResBlock1d(ch2 + ch1, ch1)
+
+        self.conv_out = nn.Conv1d(ch1, N_BINS, kernel_size=3, padding=1)  # 256채널 → 768채널 노이즈
+
+    def forward(self, x, t):  # x: (B, 1, 768, 101), t: (B,)
+
+        x = x[:, 0]  # (B, 768, 101): 2D용 채널 1칸을 떼어 768을 채널로 쓴다.
+        num_frames = x.shape[-1]
+        x = F.pad(x, (0, UNET_FRAMES - num_frames))  # (B, 768, 104)
+
+        t_emb = self.time_mlp(get_timestep_embedding(t, TIME_EMBEDDING_DIM))
+
+        h = self.conv_in(x)  # (B, 256, 104)
+        h1 = self.enc1(h, t_emb)  # (B, 256, 104)
+        h2 = self.enc2(self.down1(h1), t_emb)  # (B, 512, 52)
+        h = self.mid(self.down2(h2), t_emb)  # (B, 512, 26)
+
+        h = self.dec2(torch.cat([self.up2(h), h2], dim=1), t_emb)  # (B, 512, 52)
+        h = self.dec1(torch.cat([self.up1(h), h1], dim=1), t_emb)  # (B, 256, 104)
+        out = self.conv_out(h)  # (B, 768, 104)
+
+        return out[:, None, :, :num_frames]  # (B, 1, 768, 101): 입력과 같은 모양으로 돌려준다.
+
+
+def make_model():  # FEATURE_TYPE에 맞는 U-Net을 만든다. (train.py와 evaluate.py가 같이 쓴다)
+
+    if FEATURE_TYPE == "wavlm":
+        return UNet1d()  # WavLM 특징 → 1D U-Net
+    return UNet()  # Mel, 스펙트로그램 → 2D U-Net
+
+
 # ===============================
 # 5. 학습 데이터: random crop Dataset
 # ===============================
@@ -328,7 +414,7 @@ if __name__ == "__main__":  # python train.py로 실행했을 때만 아래가 �
     print(f"train 파일 {len(train_data['mels'])}개, val 조각 {val_data['mels'].shape[0]}개")
 
     # ----- 크기 확인 -----
-    model = UNet().to(DEVICE)
+    model = make_model().to(DEVICE)  # FEATURE_TYPE에 맞는 U-Net (WavLM이면 1D)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 
     ema = None  # EMA 모델 (USE_EMA=False면 쓰지 않는다)

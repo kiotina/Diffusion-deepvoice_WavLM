@@ -1,6 +1,8 @@
 # ===============================
 # preprocess.py
 # 음성 파일을 U-Net에 넣을 수 있는 log-Mel로 바꿔서 저장한다.
+# FEATURE_TYPE = "wavlm"이면 log-Mel 대신 WavLM 특징 (768, 프레임 수)을 같은 방식으로 저장한다.
+# (파일·변수 이름은 처음 만든 대로 mel이라고 두었다. "모델 입력"이라는 뜻으로 읽으면 된다.)
 #
 # 만드는 파일 (outputs/preprocess 폴더)
 #   mel_stats.pt         : train real로 계산한 Mel 칸별 평균·표준편차
@@ -19,6 +21,7 @@ matplotlib.use("Agg")  # 창을 띄우지 않고 파일로만 저장한다.
 import matplotlib.pyplot as plt  # 그림을 그린다.
 import numpy as np  # 숫자 배열을 계산한다.
 import torch  # 결과를 PyTorch 텐서로 저장한다.
+from transformers import WavLMModel  # 미리 학습된 WavLM을 불러온다. (FEATURE_TYPE = "wavlm"일 때만 쓴다)
 
 from config import *  # config.py의 모든 설정값을 가져온다.
 
@@ -73,7 +76,7 @@ def load_audio(path):  # 음성 파일 하나를 읽는다.
 
 def wave_to_logmel(wave):  # waveform → log-Mel 또는 log 스펙트로그램 (N_BINS, 프레임 수)
 
-    if USE_MEL:  # Mel을 쓰는 경우 (원래 방식)
+    if FEATURE_TYPE == "mel":  # Mel을 쓰는 경우 (원래 방식)
         mel = librosa.feature.melspectrogram(  # STFT → 파워 → Mel 필터를 한 번에 계산한다.
             y=wave,
             sr=SAMPLE_RATE,
@@ -99,13 +102,33 @@ def wave_to_logmel(wave):  # waveform → log-Mel 또는 log 스펙트로그램 
     return logmel.astype(np.float32)  # (N_BINS, 프레임 수)
 
 
+WAVLM = {}  # 불러온 WavLM을 담아 둘 곳. 파일마다 다시 불러오지 않도록 처음 한 번만 채운다.
+
+
+def wave_to_wavlm(wave):  # waveform → WavLM 특징 (768, 프레임 수)
+
+    if "model" not in WAVLM:  # 처음 부를 때만
+        WAVLM["model"] = WavLMModel.from_pretrained(WAVLM_MODEL_NAME).to(DEVICE).eval()  # 미리 학습된 가중치를 받아 GPU에 올린다. (학습하지 않고 그대로 쓴다)
+        print(f"WavLM 불러옴: {WAVLM_MODEL_NAME}, {WAVLM_LAYER}층 사용")
+
+    x = torch.from_numpy(wave)[None].to(DEVICE)  # (1, 샘플 수). wavlm-base-plus는 진폭 정규화 없이 waveform을 그대로 받는다.
+    with torch.no_grad():  # WavLM은 학습하지 않는다.
+        out = WAVLM["model"](x, output_hidden_states=True)  # 모든 층의 출력을 받는다.
+    hidden = out.hidden_states[WAVLM_LAYER][0]  # (프레임 수, 768): 고른 층의 출력. 20ms마다 768개 숫자
+
+    return hidden.T.cpu().numpy().astype(np.float32)  # (768, 프레임 수): Mel과 같은 (세로 칸, 프레임) 모양으로 맞춘다.
+
+
 def make_silence_mask(wave, num_frames):  # 무음 프레임은 0, 소리 있는 프레임은 1
 
-    rms = librosa.feature.rms(  # 프레임마다 소리 크기(RMS 에너지)를 계산한다.
-        y=wave,
-        frame_length=N_FFT,
-        hop_length=HOP_LENGTH,  # Mel과 같은 간격으로 계산해야 프레임이 맞는다.
-    )[0]
+    if FEATURE_TYPE == "wavlm":  # WavLM 프레임 i는 샘플 [320i, 320i + 400) 구간을 본다.
+        rms = librosa.feature.rms(y=wave, frame_length=WIN_LENGTH, hop_length=WAVLM_HOP, center=False)[0]  # 같은 구간으로 소리 크기를 재야 프레임이 맞는다. (WIN_LENGTH = 400샘플)
+    else:
+        rms = librosa.feature.rms(  # 프레임마다 소리 크기(RMS 에너지)를 계산한다.
+            y=wave,
+            frame_length=N_FFT,
+            hop_length=HOP_LENGTH,  # Mel과 같은 간격으로 계산해야 프레임이 맞는다.
+        )[0]
 
     rms_db = librosa.amplitude_to_db(rms, ref=np.max)  # 가장 큰 프레임을 0dB로 놓고 dB로 바꾼다.
     silence_mask = (rms_db > SILENCE_DB_THRESHOLD).astype(np.float32)  # 기준보다 크면 1(소리 있음)
@@ -134,7 +157,10 @@ def normalize_logmel(logmel, stats):  # train 통계로 정규화한다. (평균
 def file_to_logmel(path, stats=None):  # 파일 하나 → (정규화된) log-Mel과 mask
 
     wave = load_audio(path)  # 음성을 읽는다.
-    logmel = wave_to_logmel(wave)  # log-Mel로 바꾼다.
+    if FEATURE_TYPE == "wavlm":  # WavLM 특징을 쓰는 경우
+        logmel = wave_to_wavlm(wave)  # (768, 프레임 수). 아래 mask·정규화는 Mel과 똑같이 한다.
+    else:
+        logmel = wave_to_logmel(wave)  # log-Mel로 바꾼다.
     mask = make_frame_mask(wave, logmel.shape[1])  # 프레임별 mask를 만든다.
 
     if stats is not None:  # 통계가 주어지면
@@ -243,7 +269,7 @@ def build_train(stats_out_path, train_out_path):  # train real → 통계 + 파�
     }, train_out_path)
 
     total_frames = sum(m.shape[1] for m in mels)  # 전체 프레임 수
-    print(f"[train] 저장 완료: 파일 {len(mels)}개, 전체 {total_frames}프레임 (약 {total_frames * HOP_LENGTH / SAMPLE_RATE / 60:.1f}분)")
+    print(f"[train] 저장 완료: 파일 {len(mels)}개, 전체 {total_frames}프레임 (약 {total_frames * FRAME_HOP / SAMPLE_RATE / 60:.1f}분)")
 
     return stats, mels[0], torch.from_numpy(masks[0])  # 확인용 그림에 쓸 첫 파일도 돌려준다.
 
@@ -308,7 +334,7 @@ if __name__ == "__main__":  # python preprocess.py로 실행했을 때만 아래
     print(f"  학습 데이터: {TRAIN_DATA}, 검증 데이터: {DEV_DATA}")
     print(f"  2초 조각 = {SEGMENT_FRAMES}프레임, 1초 = {MIN_SEGMENT_FRAMES}프레임")
     print(f"  무음 mask: {MASK_SILENCE}, 파일 개수 제한: {FILE_LIMIT}")
-    print(f"  Mel 사용: {USE_MEL}, 주파수 칸 수: {N_BINS}")
+    print(f"  입력 종류: {FEATURE_TYPE}, 세로 칸 수: {N_BINS}, 프레임 간격: {FRAME_HOP}샘플")
 
     stats, example_mel, example_mask = build_train(
         stats_out_path=os.path.join(PREPROCESS_DIR, "mel_stats.pt"),

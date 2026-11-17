@@ -8,3 +8,4 @@ soundfile      # librosa가 FLAC/WAV 파일을 읽을 때 내부에서 사용
 numpy          # 숫자 배열 계산
 matplotlib     # 그림 저장 (Mel 예시, loss 곡선, 점수 분포)
 scikit-learn   # 평가 지표 계산 (EER, AUROC)
+transformers   # 미리 학습된 WavLM 불러오기 (FEATURE_TYPE = "wavlm")

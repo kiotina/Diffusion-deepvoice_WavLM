@@ -12,6 +12,7 @@
 #   score_max   : 구간 z-점수의 최댓값. 가장 의심스러운 구간 하나로 판단한다.
 #   score_maha  : (t 3개 × 주파수 대역 8개) = 24개 오차가 dev real 분포에서 얼마나 떨어져 있는지 (Mahalanobis 거리).
 #                 오차가 크든 작든 "real과 다르면" 점수가 커진다. 방향을 가정하지 않는다.
+#                 (FEATURE_TYPE = "wavlm"이면 대역이 1개라 t 3개 = 3개 특징)
 #
 # 만드는 파일 (outputs/<RUN_NAME>/evaluation_<EVAL_DATA> 폴더)
 #   segments.csv       : 구간마다 t별·대역별 오차 (파일 단위로 바로 기록 → 중간에 멈춰도 이어서 실행)
@@ -34,7 +35,7 @@ from sklearn.metrics import roc_auc_score, roc_curve  # AUROC, ROC 곡선(EER �
 
 from config import *  # config.py의 모든 설정값을 가져온다.
 from preprocess import cut_segments, file_to_logmel, pad_to_segment, read_protocol  # 음성 → Mel → 조각 (전처리와 똑같이)
-from train import UNet, forward_diffusion  # 모델과 노이즈 섞기 (학습과 똑같이)
+from train import forward_diffusion, make_model  # 모델과 노이즈 섞기 (학습과 똑같이)
 
 TIME_COLUMNS = [f"e_t{t}" for t in SCORE_TIMESTEPS]  # t별 오차 이름: e_t100, e_t300, e_t500 (대역을 평균한 값. 보정용)
 ERROR_COLUMNS = [f"e_t{t}_b{b}" for t in SCORE_TIMESTEPS for b in range(NUM_BANDS)]  # e_t100_b0, …, e_t100_b7, e_t300_b0, …, e_t500_b7 (24개)
@@ -49,7 +50,7 @@ SCORE_KEYS = ["score_mean", "score_max", "score_maha"]  # 파일 점수 세 가�
 def load_model():  # best.pt(val loss가 가장 낮았던 모델)를 불러온다.
 
     checkpoint = torch.load(os.path.join(CHECKPOINT_DIR, "best.pt"), map_location=DEVICE)
-    model = UNet().to(DEVICE)
+    model = make_model().to(DEVICE)  # 학습 때와 같은 종류의 U-Net
     model.load_state_dict(checkpoint["model"])  # 학습한 가중치를 넣는다.
     model.eval()  # 평가 모드
     print(f"모델: best.pt (epoch {checkpoint['epoch']}, val loss {checkpoint['val_loss']:.4f})")
@@ -188,7 +189,7 @@ def measure_split(model, items, split, stats, fixed_noises, csv_path):  # 파일
                 print(f"  첫 구간 t별 오차(대역 평균): {np.round(errors[0].reshape(len(SCORE_TIMESTEPS), NUM_BANDS).mean(axis=1), 4)}")
 
             for start, error in zip(starts, errors):  # 구간마다 한 줄
-                start_sec = start * HOP_LENGTH / SAMPLE_RATE  # 시작 프레임 → 초
+                start_sec = start * FRAME_HOP / SAMPLE_RATE  # 시작 프레임 → 초
                 writer.writerow([split, item["file_id"], item["label"], item["attack_id"], f"{start_sec:.3f}"] + [f"{e:.6f}" for e in error])
             f.flush()  # 파일 하나가 끝날 때마다 디스크에 바로 쓴다. (중간에 멈춰도 남도록)
 

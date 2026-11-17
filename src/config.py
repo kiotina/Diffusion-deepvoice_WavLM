@@ -53,7 +53,7 @@ TRAIN_DATA = "2019_train"  # 학습에 쓸 데이터 (bona fide만 사용)
 DEV_DATA = "2019_dev"  # 검증·보정·임계값에 쓸 데이터 (bona fide만 사용)
 EVAL_DATA = "2019_eval"  # 최종 평가에 쓸 데이터. 평가 데이터를 바꿀 때는 이 이름만 바꾼다.
 
-RUN_NAME = "spec256"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
+RUN_NAME = "wavlm_l2"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
 RUN_DIR = os.path.join(OUTPUT_DIR, RUN_NAME)  # 이번 실험의 결과 폴더
 
 PREPROCESS_DIR = os.path.join(RUN_DIR, "preprocess")  # 전처리 결과를 저장할 폴더
@@ -80,11 +80,30 @@ HOP_LENGTH = 256  # 창을 옮기는 간격 (256샘플 = 16ms)
 N_MELS = 80  # Mel 주파수 칸 수 (그림의 세로 칸 수)
 LOG_EPS = 1e-6  # log(0)을 막기 위해 더하는 아주 작은 값
 
-USE_MEL = False  # True: log-Mel(N_MELS칸). False: Mel 필터를 거치지 않은 log 스펙트로그램. Mel은 고음일수록 넓은 범위를 한 칸으로 합쳐서, 고음에 남는 합성 흔적이 뭉개진다.
-N_BINS = N_MELS if USE_MEL else N_FFT // 2  # 모델에 들어가는 주파수 칸 수 (세로 칸 수). 스펙트로그램은 257칸 중 맨 위 한 칸(8kHz)을 버리고 256칸을 쓴다. (U-Net이 두 번 반으로 줄이므로 4로 나눠떨어져야 한다)
+# 디퓨전에 넣을 입력의 종류
+#   "mel"   : log-Mel (N_MELS칸). 처음 방식
+#   "spec"  : Mel 필터를 거치지 않은 log 스펙트로그램 (256칸). Mel은 고음일수록 넓은 범위를 한 칸으로 합쳐서, 고음에 남는 합성 흔적이 뭉개진다.
+#   "wavlm" : WavLM이 음성에서 뽑은 특징 (768차원). 아래 "WavLM 설정" 참고
+FEATURE_TYPE = "wavlm"
 
-SEGMENT_FRAMES = 1 + int(SEGMENT_SEC * SAMPLE_RATE) // HOP_LENGTH  # 2초 조각의 프레임 수 = 126
-MIN_SEGMENT_FRAMES = 1 + int(MIN_SEGMENT_SEC * SAMPLE_RATE) // HOP_LENGTH  # 1초 조각의 프레임 수 = 63
+
+# ===============================
+# 3-1. WavLM 설정 (FEATURE_TYPE = "wavlm"일 때만 사용)
+# ===============================
+
+# WavLM: 진짜 사람 음성 9만 4천 시간으로 미리 학습된 음성 모델 (fake는 본 적 없다 → real-only 원칙과 맞는다).
+# 음성을 넣으면 20ms마다 768개 숫자로 된 특징을 층(layer)마다 내놓는다. 우리는 그중 한 층만 꺼내 디퓨전의 입력으로 쓴다.
+WAVLM_MODEL_NAME = "microsoft/wavlm-base-plus"  # Hugging Face에서 받는 모델 이름 (처음 실행할 때 한 번 내려받는다)
+WAVLM_LAYER = 2  # 몇 번째 층의 특징을 쓸지 (0 = CNN 출력, 1~12 = Transformer 층). 앞쪽 층일수록 "소리의 결", 뒤쪽일수록 "말의 내용"을 담는다.
+# 주의: 2층은 디퓨전 없이 층마다 eval 점수를 비교해 보고 고른 값이다. (1~4층 모두 비슷하게 좋았다) 보고할 때 이 점을 밝힌다.
+WAVLM_DIM = 768  # 특징 하나의 길이 (wavlm-base-plus는 768)
+WAVLM_HOP = 320  # WavLM 특징 한 프레임 = 320샘플 = 20ms (모델 구조로 정해진 값)
+
+FRAME_HOP = WAVLM_HOP if FEATURE_TYPE == "wavlm" else HOP_LENGTH  # 프레임 하나가 몇 샘플씩 떨어져 있는지 (Mel·스펙트로그램 256, WavLM 320)
+N_BINS = {"mel": N_MELS, "spec": N_FFT // 2, "wavlm": WAVLM_DIM}[FEATURE_TYPE]  # 모델에 들어가는 세로 칸 수. 스펙트로그램은 257칸 중 맨 위 한 칸(8kHz)을 버리고 256칸을 쓴다. (2D U-Net은 두 번 반으로 줄이므로 4로 나눠떨어져야 한다)
+
+SEGMENT_FRAMES = 1 + int(SEGMENT_SEC * SAMPLE_RATE) // FRAME_HOP  # 2초 조각의 프레임 수 (Mel 126, WavLM 101)
+MIN_SEGMENT_FRAMES = 1 + int(MIN_SEGMENT_SEC * SAMPLE_RATE) // FRAME_HOP  # 1초 조각의 프레임 수 (Mel 63, WavLM 51)
 
 
 # ===============================
@@ -111,7 +130,8 @@ BETA_END = 0.02  # 마지막 단계에서 추가할 노이즈의 크기 (선형 
 BASE_CHANNELS = 32  # U-Net 첫 단계의 채널 수 (32 → 64 → 128)
 TIME_EMBEDDING_DIM = 128  # timestep 숫자 하나를 128개의 특징값으로 바꾼다.
 GROUP_NORM_GROUPS = 8  # GroupNorm에서 채널을 몇 묶음으로 나눠 정규화할지 (32, 64, 128 모두 나눠떨어진다)
-UNET_FRAMES = 128  # U-Net 안에서 126프레임을 128로 채운다. (2번 반으로 줄여도 128 → 64 → 32로 딱 나눠진다)
+UNET_FRAMES = 4 * ((SEGMENT_FRAMES + 3) // 4)  # U-Net 안에서 프레임 수를 4의 배수로 채운다. (2번 반으로 줄여도 딱 나눠지도록. Mel 126 → 128, WavLM 101 → 104)
+UNET1D_CHANNELS = 256  # WavLM용 1D U-Net 첫 단계의 채널 수 (256 → 512 → 512). 입력이 768채널이라 2D U-Net(32)보다 크게 잡는다.
 
 
 # ===============================
@@ -144,9 +164,10 @@ EMA_DECAY = 0.995  # EMA가 예전 가중치를 유지하는 비율. 1 epoch ≈
 SCORE_TIMESTEPS = [100, 300, 500]  # 이상 점수에 사용할 t
 SCORE_NOISE_SEEDS = [1729, 2718]  # t마다 사용할 고정 노이즈의 시작값
 INFER_HOP_SEC = 1.0  # 평가할 때 2초 창을 1초씩 밀면서 자른다.
-INFER_HOP_FRAMES = int(INFER_HOP_SEC * SAMPLE_RATE) // HOP_LENGTH  # 1초 = 62프레임
+INFER_HOP_FRAMES = int(INFER_HOP_SEC * SAMPLE_RATE) // FRAME_HOP  # 1초 = Mel 62프레임, WavLM 50프레임
 
-NUM_BANDS = 8  # 주파수 칸(N_BINS)을 8개 대역으로 나눠 오차를 따로 잰다. Mel 80칸이면 대역마다 10칸, 스펙트로그램 256칸이면 대역마다 32칸(1kHz씩). (N_BINS를 나눠떨어지게 할 것)
+NUM_BANDS = 1 if FEATURE_TYPE == "wavlm" else 8  # 주파수 칸(N_BINS)을 이 개수의 대역으로 나눠 오차를 따로 잰다. 스펙트로그램 256칸이면 8 → 대역마다 32칸(1kHz씩). (N_BINS를 나눠떨어지게 할 것. Mel 80칸이면 8)
+# WavLM의 768차원은 주파수처럼 위아래 순서가 있는 값이 아니라서, 이웃한 차원끼리 묶는 "대역"이 의미가 없다. 그래서 1(전체 하나)로 둔다.
 
 THRESHOLD_PERCENTILE = 95  # dev bona fide 점수의 95백분위를 임계값으로 쓴다.
 
