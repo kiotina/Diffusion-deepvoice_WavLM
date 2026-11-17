@@ -68,7 +68,7 @@ def make_fixed_noises():  # seed마다 노이즈 하나를 만들어, 모든 파
     noises = []  # SCORE_NOISE_SEEDS 순서대로
     for seed in SCORE_NOISE_SEEDS:
         generator = torch.Generator().manual_seed(seed)  # 이 seed 전용 난수
-        noise = torch.randn((1, 1, N_MELS, SEGMENT_FRAMES), generator=generator)  # (1, 1, 80, 126)
+        noise = torch.randn((1, 1, N_BINS, SEGMENT_FRAMES), generator=generator)  # (1, 1, 주파수 칸 수, 126)
         noises.append(noise.to(DEVICE))
     # 모든 파일이 같은 노이즈로 시험을 보므로, 점수 차이는 노이즈가 아니라 음성의 차이에서 나온다.
 
@@ -82,7 +82,7 @@ def make_fixed_noises():  # seed마다 노이즈 하나를 만들어, 모든 파
 def band_mse(pred, target, mask):  # 구간마다, 주파수 대역마다 masked MSE (train.py의 masked_mse를 대역별로 나눈 것)
 
     batch = pred.shape[0]  # 구간 수 B
-    bins_per_band = N_MELS // NUM_BANDS  # 대역 하나의 Mel 칸 수 = 10
+    bins_per_band = N_BINS // NUM_BANDS  # 대역 하나의 주파수 칸 수 (Mel 80칸이면 10, 스펙트로그램 256칸이면 32)
 
     mask = mask.expand_as(pred)  # (B, 1, 1, 126) → (B, 1, 80, 126): 같은 프레임의 80칸에 같은 mask
     squared_error = (pred - target) ** 2 * mask  # mask=0인 칸(패딩, 무음)의 오차는 0으로 지운다.

@@ -53,7 +53,7 @@ TRAIN_DATA = "2019_train"  # 학습에 쓸 데이터 (bona fide만 사용)
 DEV_DATA = "2019_dev"  # 검증·보정·임계값에 쓸 데이터 (bona fide만 사용)
 EVAL_DATA = "2019_eval"  # 최종 평가에 쓸 데이터. 평가 데이터를 바꿀 때는 이 이름만 바꾼다.
 
-RUN_NAME = "ema_tmax600"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
+RUN_NAME = "spec256"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
 RUN_DIR = os.path.join(OUTPUT_DIR, RUN_NAME)  # 이번 실험의 결과 폴더
 
 PREPROCESS_DIR = os.path.join(RUN_DIR, "preprocess")  # 전처리 결과를 저장할 폴더
@@ -79,6 +79,9 @@ WIN_LENGTH = 400  # 실제로 보는 창의 길이 (400샘플 = 25ms)
 HOP_LENGTH = 256  # 창을 옮기는 간격 (256샘플 = 16ms)
 N_MELS = 80  # Mel 주파수 칸 수 (그림의 세로 칸 수)
 LOG_EPS = 1e-6  # log(0)을 막기 위해 더하는 아주 작은 값
+
+USE_MEL = False  # True: log-Mel(N_MELS칸). False: Mel 필터를 거치지 않은 log 스펙트로그램. Mel은 고음일수록 넓은 범위를 한 칸으로 합쳐서, 고음에 남는 합성 흔적이 뭉개진다.
+N_BINS = N_MELS if USE_MEL else N_FFT // 2  # 모델에 들어가는 주파수 칸 수 (세로 칸 수). 스펙트로그램은 257칸 중 맨 위 한 칸(8kHz)을 버리고 256칸을 쓴다. (U-Net이 두 번 반으로 줄이므로 4로 나눠떨어져야 한다)
 
 SEGMENT_FRAMES = 1 + int(SEGMENT_SEC * SAMPLE_RATE) // HOP_LENGTH  # 2초 조각의 프레임 수 = 126
 MIN_SEGMENT_FRAMES = 1 + int(MIN_SEGMENT_SEC * SAMPLE_RATE) // HOP_LENGTH  # 1초 조각의 프레임 수 = 63
@@ -129,8 +132,8 @@ VAL_T_BIN_SIZE = 200  # val loss를 t 구간(0–200, 200–400, …, 800–1000
 LOSS_EPS = 1e-8  # masked MSE에서 mask=1 칸이 0개일 때 0으로 나누지 않도록 막는 값
 
 # 학습 실험 스위치 (기본값이면 원래 코드와 똑같이 동작한다)
-TRAIN_T_MAX = 600  # 학습·검증에서 뽑는 t의 상한 (기본 1000). 점수에는 t ≤ 500만 쓰므로 600으로 줄여 그 구간에 집중해 볼 수 있다. VAL_T_BIN_SIZE의 배수로 둔다.
-USE_EMA = True  # True면 가중치의 이동 평균(EMA) 모델로 검증하고 저장한다. (epoch마다 가중치가 흔들리는 것을 줄인다)
+TRAIN_T_MAX = TIMESTEPS  # 학습·검증에서 뽑는 t의 상한 (기본 1000). 점수에는 t ≤ 500만 쓰므로 600으로 줄여 그 구간에 집중해 볼 수 있다. VAL_T_BIN_SIZE의 배수로 둔다.
+USE_EMA = False  # True면 가중치의 이동 평균(EMA) 모델로 검증하고 저장한다. (epoch마다 가중치가 흔들리는 것을 줄인다)
 EMA_DECAY = 0.995  # EMA가 예전 가중치를 유지하는 비율. 1 epoch ≈ 81 step(2,580개 ÷ 32)이라 대략 최근 2~3 epoch의 평균이 된다.
 
 
@@ -143,7 +146,7 @@ SCORE_NOISE_SEEDS = [1729, 2718]  # t마다 사용할 고정 노이즈의 시작
 INFER_HOP_SEC = 1.0  # 평가할 때 2초 창을 1초씩 밀면서 자른다.
 INFER_HOP_FRAMES = int(INFER_HOP_SEC * SAMPLE_RATE) // HOP_LENGTH  # 1초 = 62프레임
 
-NUM_BANDS = 8  # 80개 Mel 칸을 8개 주파수 대역(대역마다 10칸)으로 나눠 오차를 따로 잰다. (N_MELS를 나눠떨어지게 할 것)
+NUM_BANDS = 8  # 주파수 칸(N_BINS)을 8개 대역으로 나눠 오차를 따로 잰다. Mel 80칸이면 대역마다 10칸, 스펙트로그램 256칸이면 대역마다 32칸(1kHz씩). (N_BINS를 나눠떨어지게 할 것)
 
 THRESHOLD_PERCENTILE = 95  # dev bona fide 점수의 95백분위를 임계값으로 쓴다.
 

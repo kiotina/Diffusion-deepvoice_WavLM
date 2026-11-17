@@ -71,21 +71,32 @@ def load_audio(path):  # 음성 파일 하나를 읽는다.
     return wave.astype(np.float32)  # 32비트 실수로 돌려준다.
 
 
-def wave_to_logmel(wave):  # waveform → log-Mel (80, 프레임 수)
+def wave_to_logmel(wave):  # waveform → log-Mel 또는 log 스펙트로그램 (N_BINS, 프레임 수)
 
-    mel = librosa.feature.melspectrogram(  # STFT → 파워 → Mel 필터를 한 번에 계산한다.
-        y=wave,
-        sr=SAMPLE_RATE,
-        n_fft=N_FFT,
-        win_length=WIN_LENGTH,
-        hop_length=HOP_LENGTH,
-        n_mels=N_MELS,
-        power=2.0,  # 크기의 제곱(파워)을 사용한다.
-    )
+    if USE_MEL:  # Mel을 쓰는 경우 (원래 방식)
+        mel = librosa.feature.melspectrogram(  # STFT → 파워 → Mel 필터를 한 번에 계산한다.
+            y=wave,
+            sr=SAMPLE_RATE,
+            n_fft=N_FFT,
+            win_length=WIN_LENGTH,
+            hop_length=HOP_LENGTH,
+            n_mels=N_MELS,
+            power=2.0,  # 크기의 제곱(파워)을 사용한다.
+        )
+    else:  # Mel 필터를 거치지 않는 경우: STFT 결과를 그대로 쓴다.
+        stft = librosa.stft(  # 프레임마다 주파수 성분을 계산한다. (257, 프레임 수): 0Hz ~ 8000Hz를 31.25Hz 간격으로
+            y=wave,
+            n_fft=N_FFT,
+            win_length=WIN_LENGTH,
+            hop_length=HOP_LENGTH,  # Mel과 같은 설정이라 프레임 수도 같다.
+        )
+        mel = np.abs(stft) ** 2  # 크기의 제곱(파워). Mel 방식의 power=2.0과 같다. (변수 이름은 아래 코드와 맞추려고 mel로 둔다)
+        mel = mel[:N_BINS]  # 맨 위 한 칸(8000Hz)을 버려 256칸으로 맞춘다.
+    # Mel은 이 파워 스펙트로그램의 여러 칸을 묶어 80칸으로 줄인 것이다. 묶지 않으면 모든 주파수를 같은 간격으로 본다.
 
     logmel = np.log(mel + LOG_EPS)  # 값의 차이가 너무 크지 않도록 log로 압축한다.
 
-    return logmel.astype(np.float32)  # (80, 프레임 수)
+    return logmel.astype(np.float32)  # (N_BINS, 프레임 수)
 
 
 def make_silence_mask(wave, num_frames):  # 무음 프레임은 0, 소리 있는 프레임은 1
@@ -174,8 +185,8 @@ def cut_segments(logmel, mask, hop_frames):  # 정규화된 log-Mel을 2초 조�
 
 def compute_stats(raw_logmels, masks):  # Mel 칸마다 평균과 표준편차를 구한다.
 
-    total_sum = np.zeros(N_MELS, dtype=np.float64)  # 칸별 합
-    total_sq_sum = np.zeros(N_MELS, dtype=np.float64)  # 칸별 제곱합
+    total_sum = np.zeros(N_BINS, dtype=np.float64)  # 칸별 합
+    total_sq_sum = np.zeros(N_BINS, dtype=np.float64)  # 칸별 제곱합
     total_count = 0  # 사용한 프레임 수
 
     for logmel, mask in zip(raw_logmels, masks):  # 파일마다
@@ -297,6 +308,7 @@ if __name__ == "__main__":  # python preprocess.py로 실행했을 때만 아래
     print(f"  학습 데이터: {TRAIN_DATA}, 검증 데이터: {DEV_DATA}")
     print(f"  2초 조각 = {SEGMENT_FRAMES}프레임, 1초 = {MIN_SEGMENT_FRAMES}프레임")
     print(f"  무음 mask: {MASK_SILENCE}, 파일 개수 제한: {FILE_LIMIT}")
+    print(f"  Mel 사용: {USE_MEL}, 주파수 칸 수: {N_BINS}")
 
     stats, example_mel, example_mask = build_train(
         stats_out_path=os.path.join(PREPROCESS_DIR, "mel_stats.pt"),
