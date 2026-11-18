@@ -212,3 +212,22 @@ else:  # 사용할 수 있는 GPU가 없다면
     DEVICE = torch.device("cpu")  # CPU로 계산한다.
 
 torch.manual_seed(SEED)  # PyTorch 난수 시작값을 고정한다.
+
+
+
+# ===============================
+# 11. 웹 데모 설정 (explain.py, server.py)
+# ===============================
+
+EXPLAIN_DIR = os.path.join(RUN_DIR, "explain")  # 설명용 기준값을 저장할 폴더 (실험마다 따로)
+REFERENCE_PATH = os.path.join(EXPLAIN_DIR, "reference.json")  # explain.py가 dev real로 만든 기준값
+WEB_DIR = os.path.join(PROJECT_ROOT, "web")  # index.html이 있는 폴더
+
+DECISION_KEY = "score_mean"  # 웹에서 판정에 쓸 점수 (score_mean, score_max, score_maha 중 하나). eval 결과가 가장 좋았던 것으로 바꾼다.
+MAX_UPLOAD_MB = 20  # 업로드 크기 상한
+MAX_AUDIO_SEC = 30.0  # 이보다 긴 음성은 앞부분만 분석한다. (GPU 메모리, 응답 시간)
+SCORE_CHUNK = 16  # U-Net에 한 번에 넣을 구간 수 (× t 3개 × 노이즈 2개). 메모리가 부족하면 줄인다.
+DISPLAY_N_MELS = 64  # 화면에 깔아 둘 Mel 그림의 칸 수. 모델 입력이 아니라 사람이 위치를 찾는 배경용이다.
+
+SERVER_HOST = "127.0.0.1"  # 내 컴퓨터에서만 접속 가능. "0.0.0.0"으로 열면 음성이 네트워크로 오가므로 HTTPS가 필요하다.
+SERVER_PORT = 8000  # 브라우저 주소: http://127.0.0.1:8000
