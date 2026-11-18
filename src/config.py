@@ -53,7 +53,7 @@ TRAIN_DATA = "2019_train"  # 학습에 쓸 데이터 (bona fide만 사용)
 DEV_DATA = "2019_dev"  # 검증·보정·임계값에 쓸 데이터 (bona fide만 사용)
 EVAL_DATA = "2019_eval"  # 최종 평가에 쓸 데이터. 평가 데이터를 바꿀 때는 이 이름만 바꾼다.
 
-RUN_NAME = "wavlm_l2"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
+RUN_NAME = "wavlm_l3"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
 RUN_DIR = os.path.join(OUTPUT_DIR, RUN_NAME)  # 이번 실험의 결과 폴더
 
 PREPROCESS_DIR = os.path.join(RUN_DIR, "preprocess")  # 전처리 결과를 저장할 폴더
@@ -94,8 +94,9 @@ FEATURE_TYPE = "wavlm"
 # WavLM: 진짜 사람 음성 9만 4천 시간으로 미리 학습된 음성 모델 (fake는 본 적 없다 → real-only 원칙과 맞는다).
 # 음성을 넣으면 20ms마다 768개 숫자로 된 특징을 층(layer)마다 내놓는다. 우리는 그중 한 층만 꺼내 디퓨전의 입력으로 쓴다.
 WAVLM_MODEL_NAME = "microsoft/wavlm-base-plus"  # Hugging Face에서 받는 모델 이름 (처음 실행할 때 한 번 내려받는다)
-WAVLM_LAYER = 2  # 몇 번째 층의 특징을 쓸지 (0 = CNN 출력, 1~12 = Transformer 층). 앞쪽 층일수록 "소리의 결", 뒤쪽일수록 "말의 내용"을 담는다.
-# 주의: 2층은 디퓨전 없이 층마다 eval 점수를 비교해 보고 고른 값이다. (1~4층 모두 비슷하게 좋았다) 보고할 때 이 점을 밝힌다.
+WAVLM_LAYER = 3  # 몇 번째 층의 특징을 쓸지 (0 = CNN 출력, 1~12 = Transformer 층). 앞쪽 층일수록 "소리의 결", 뒤쪽일수록 "말의 내용"을 담는다.
+# 주의: 3층은 0~5층으로 디퓨전을 각각 학습하고 eval 8,000개 표본(seed 42)의 점수를 비교해 고른 값이다. (EER 0층 32% → 3층 14% → 5층 20%)
+#       고를 때 쓰지 않은 나머지 63,237개에서도 EER이 같아(14.26% vs 14.08%) 표본에 맞춘 효과는 없었지만, 보고할 때 이 점을 밝힌다.
 WAVLM_DIM = 768  # 특징 하나의 길이 (wavlm-base-plus는 768)
 WAVLM_HOP = 320  # WavLM 특징 한 프레임 = 320샘플 = 20ms (모델 구조로 정해진 값)
 
@@ -212,3 +213,22 @@ else:  # 사용할 수 있는 GPU가 없다면
     DEVICE = torch.device("cpu")  # CPU로 계산한다.
 
 torch.manual_seed(SEED)  # PyTorch 난수 시작값을 고정한다.
+
+
+
+# ===============================
+# 11. 웹 데모 설정 (explain.py, server.py)
+# ===============================
+
+EXPLAIN_DIR = os.path.join(RUN_DIR, "explain")  # 설명용 기준값을 저장할 폴더 (실험마다 따로)
+REFERENCE_PATH = os.path.join(EXPLAIN_DIR, "reference.json")  # explain.py가 dev real로 만든 기준값
+WEB_DIR = os.path.join(PROJECT_ROOT, "web")  # index.html이 있는 폴더
+
+DECISION_KEY = "score_mean"  # 웹에서 판정에 쓸 점수 (score_mean, score_max, score_maha 중 하나). eval 결과가 가장 좋았던 것으로 바꾼다.
+MAX_UPLOAD_MB = 20  # 업로드 크기 상한
+MAX_AUDIO_SEC = 30.0  # 이보다 긴 음성은 앞부분만 분석한다. (GPU 메모리, 응답 시간)
+SCORE_CHUNK = 16  # U-Net에 한 번에 넣을 구간 수 (× t 3개 × 노이즈 2개). 메모리가 부족하면 줄인다.
+DISPLAY_N_MELS = 64  # 화면에 깔아 둘 Mel 그림의 칸 수. 모델 입력이 아니라 사람이 위치를 찾는 배경용이다.
+
+SERVER_HOST = "127.0.0.1"  # 내 컴퓨터에서만 접속 가능. "0.0.0.0"으로 열면 음성이 네트워크로 오가므로 HTTPS가 필요하다.
+SERVER_PORT = 8000  # 브라우저 주소: http://127.0.0.1:8000
