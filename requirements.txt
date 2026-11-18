@@ -11,3 +11,5 @@ scikit-learn   # 평가 지표 계산 (EER, AUROC)
 transformers   # 미리 학습된 WavLM 불러오기 (FEATURE_TYPE = "wavlm")
 imageio-ffmpeg # 코덱 증강용 ffmpeg 실행 파일 (venv 안에 설치된다. AUGMENT_CODEC = True)
 scipy          # 코덱 증강의 pstn 흉내에서 대역 통과 필터 (librosa와 함께 설치되지만 직접 쓰므로 적어 둔다)
+fastapi
+uvicorn
