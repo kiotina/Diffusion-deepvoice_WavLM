@@ -1,4 +1,4 @@
-# Real-only Diffusion 딥보이스 탐지 (PBL2 prototype)
+# Real-only Diffusion 딥보이스 탐지 모델 개발
 
 진짜 음성(bona fide)만으로 디퓨전 모델(DDPM)을 학습하고, **노이즈 예측 오차**를 이상 점수로 사용해 가짜 음성(spoof)을 탐지함.
 학습, 정규화, 임계값 설정까지 모든 단계에서 **가짜 음성을 사용하지 않음** (real-only).
