@@ -1,5 +1,27 @@
+# 가상환경, 파이썬 캐시
 .venv/
-outputs/
 __pycache__/
+
+# 실행 결과 (전처리 파일, 모델, 평가 결과: 수 GB)
+outputs/
+
+# 개인 작업 문서
 CLAUDE.md
 docs/
+
+# 데모 영상 작업물 (원본 녹화, 중간 파일, 완성 영상)
+demo_raw/
+demo_out/
+
+# 시연용 음성 샘플 (ASVspoof 데이터는 각자 내려받음)
+test_samples/
+
+# 데이터·모델 파일이 실수로 섞여 들어가는 것 방지
+*.flac
+*.wav
+*.pt
+*.mp4
+
+# OS가 만드는 파일
+Thumbs.db
+desktop.ini
