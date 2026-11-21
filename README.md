@@ -3,6 +3,17 @@
 진짜 음성(bona fide)만으로 디퓨전 모델(DDPM)을 학습하고, **노이즈 예측 오차**를 이상 점수로 사용해 가짜 음성(spoof)을 탐지함.
 학습, 정규화, 임계값 설정까지 모든 단계에서 **가짜 음성을 사용하지 않음** (real-only).
 
+## 웹 데모
+
+모델 없이 화면만 볼 수 있음 (GitHub Pages)
+
+- 화면 보기: https://kiotina.github.io/Diffusion-deepvoice_WavLM/web/
+- 예시 결과 보기: https://kiotina.github.io/Diffusion-deepvoice_WavLM/web/?demo=1
+
+GitHub Pages에는 분석 서버가 없어서 실제 음성 분석은 동작하지 않음 (화면 위에 "분석 서버에 연결되지 않음"으로 표시됨).
+주소 뒤에 `?demo=1`을 붙이면 예시 데이터로 결과 화면(판정, 구간별 점수 등)을 볼 수 있음.
+실제 분석은 아래 「실행」의 웹 서버를 내 컴퓨터에서 켜야 가능함.
+
 ## 결과
 
 ASVspoof LA eval 전체, 점수 `score_mean`, 임계값 dev real 95%
@@ -47,7 +58,11 @@ PBL2_prototype/
 │   ├─ config.py        경로와 모든 설정값 (실험할 때는 이 파일만 수정)
 │   ├─ preprocess.py    음성 → WavLM 특징(또는 Mel·스펙트로그램), 무음 mask, 정규화, 저장
 │   ├─ train.py         DDPM 학습 (WavLM용 1D U-Net, Mel·스펙트로그램용 2D U-Net)
-│   └─ evaluate.py      이상 점수, 임계값, EER·AUROC, 공격별 결과
+│   ├─ evaluate.py      이상 점수, 임계값, EER·AUROC, 공격별 결과
+│   ├─ explain.py       음성 하나를 분석해 판정과 구간별 설명을 만듦
+│   └─ server.py        웹 서버 (음성을 받아 explain.py로 분석)
+├─ web/
+│   └─ index.html       웹 화면 (?demo=1로 서버 없이 예시 보기)
 ├─ outputs/             실행 결과 (Git 제외). 실험마다 outputs/<RUN_NAME>/에 저장
 ├─ requirements.txt
 └─ README.md
@@ -90,6 +105,13 @@ train·dev의 fake는 사용하지 않음.
 python src/preprocess.py   # 약 5분
 python src/train.py        # 약 12분 (100 epoch)
 python src/evaluate.py     # 2019 eval 전체 약 1시간 10분
+```
+
+웹에서 직접 음성을 분석하려면 (학습한 모델 필요)
+
+```powershell
+python src/explain.py      # 처음 한 번 (기준값 만들기)
+python src/server.py       # 브라우저에서 http://127.0.0.1:8000
 ```
 
 ### 자주 바꾸는 설정 (`src/config.py`)
