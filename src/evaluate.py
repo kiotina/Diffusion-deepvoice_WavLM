@@ -35,7 +35,7 @@ import torch  # 모델 실행
 from sklearn.metrics import roc_auc_score, roc_curve  # AUROC, ROC 곡선(EER 계산용)
 
 from config import *  # config.py의 모든 설정값을 가져온다.
-from preprocess import add_noise, cut_segments, load_audio, load_noise_bank, pad_to_segment, read_protocol, wave_to_input  # 음성 → Mel → 조각 (전처리와 똑같이)
+from preprocess import add_noise, cut_segments, load_audio, load_noise_bank, pad_to_segment, random_room, read_protocol, wave_to_input  # 음성 → Mel → 조각 (전처리와 똑같이)
 from train import forward_diffusion, make_model  # 모델과 노이즈 섞기 (학습과 똑같이)
 
 TIME_COLUMNS = [f"e_t{t}" for t in SCORE_TIMESTEPS]  # t별 오차 이름: e_t100, e_t300, e_t500 (대역을 평균한 값. 보정용)
@@ -187,6 +187,9 @@ def measure_split(model, items, split, stats, fixed_noises, csv_path):  # 파일
             if split == "eval" and EVAL_NOISE_SNR is not None:  # 잡음 평가: eval 파일(real·fake 모두)에만 섞는다. dev real은 깨끗한 그대로
                 rng = np.random.default_rng(zlib.crc32(item["file_id"].encode()))  # 파일 ID로 난수를 정한다. → 언제 돌려도, SNR을 바꿔도 같은 잡음·같은 빈 구간
                 wave = add_noise(wave, load_noise_bank(NOISE_EVAL_FOLDS), EVAL_NOISE_SNR, rng)  # 학습 때 들어 본 적 없는 묶음의 잡음
+            if split == "eval" and EVAL_ROOM:  # 방 환경 평가: eval 파일(real·fake 모두)에만 입힌다. dev real은 깨끗한 그대로
+                rng = np.random.default_rng(zlib.crc32(item["file_id"].encode()))  # 파일 ID로 난수를 정한다. → 언제 돌려도 같은 방 환경
+                wave = random_room(wave, rng)  # 학습과 같은 범위에서 울림·잡음을 새로 만든다.
             starts, errors = measure_file(model, wave, stats, fixed_noises)  # (S, 3)
 
             if i == 0:  # 첫 파일에서 크기와 값을 확인한다.
@@ -402,7 +405,7 @@ if __name__ == "__main__":  # python evaluate.py로 실행했을 때만 아래�
 
     os.makedirs(EVAL_DIR, exist_ok=True)  # 결과 폴더를 만든다.
     segments_path = os.path.join(EVAL_DIR, "segments.csv")
-    print(f"장치: {DEVICE}, EVAL_LIMIT: {EVAL_LIMIT}, 무음 자르기: {TRIM_SILENCE}, eval 잡음 SNR: {EVAL_NOISE_SNR}")
+    print(f"장치: {DEVICE}, EVAL_LIMIT: {EVAL_LIMIT}, 무음 자르기: {TRIM_SILENCE}, eval 잡음 SNR: {EVAL_NOISE_SNR}, eval 방 환경: {EVAL_ROOM}")
     print(f"점수용 t: {SCORE_TIMESTEPS}, 노이즈 seed: {SCORE_NOISE_SEEDS}, 창 2초 / hop {INFER_HOP_SEC}초")
 
     model = load_model()

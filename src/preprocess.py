@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt  # 그림을 그린다.
 import numpy as np  # 숫자 배열을 계산한다.
 import soundfile as sf  # 코덱 증강 예시를 wav 파일로 저장한다. (직접 들어 보기용)
 import torch  # 결과를 PyTorch 텐서로 저장한다.
-from scipy.signal import butter, sosfilt  # pstn 흉내: 일반 전화망처럼 일부 대역만 통과시키는 필터
+from scipy.signal import butter, fftconvolve, sosfilt  # pstn 흉내: 일부 대역만 통과시키는 필터 / 방 울림: 말소리에 잔향 응답을 입힌다.
 from transformers import WavLMModel  # 미리 학습된 WavLM을 불러온다. (FEATURE_TYPE = "wavlm"일 때만 쓴다)
 
 from config import *  # config.py의 모든 설정값을 가져온다.
@@ -328,12 +328,17 @@ def load_noise_bank(folds):  # ESC-50에서 이 묶음들의 환경음을 읽는
     return NOISE_BANK[key]
 
 
-def add_noise(wave, clips, snr_db, rng):  # 말소리 앞뒤에 무작위 길이의 빈 구간을 붙이고, 전체에 환경음을 SNR에 맞춰 섞는다.
+def pad_for_noise(wave, rng):  # 말소리 앞뒤에 무작위 길이의 빈 구간을 붙인다. (환경음·방 환경 증강이 같이 쓴다)
 
     pad_front = int(rng.uniform(*NOISE_PAD_SEC_RANGE) * SAMPLE_RATE)  # 앞 빈 구간 길이 (샘플)
     pad_back = int(rng.uniform(*NOISE_PAD_SEC_RANGE) * SAMPLE_RATE)  # 뒤 빈 구간 길이 (앞과 따로 고른다)
-    padded = np.concatenate([np.zeros(pad_front, np.float32), wave, np.zeros(pad_back, np.float32)])
-    # 빈 구간은 아래에서 잡음으로 덮인다. 잡음 없이 빈 구간만 붙이면 무음 길이가 다시 단서가 되므로 절대 따로 쓰지 않는다.
+    return np.concatenate([np.zeros(pad_front, np.float32), wave, np.zeros(pad_back, np.float32)])
+    # 빈 구간은 부른 쪽에서 반드시 잡음으로 덮는다. 잡음 없이 빈 구간만 붙이면 무음 길이가 다시 단서가 되므로 절대 따로 쓰지 않는다.
+
+
+def add_noise(wave, clips, snr_db, rng):  # 말소리 앞뒤에 무작위 길이의 빈 구간을 붙이고, 전체에 환경음을 SNR에 맞춰 섞는다.
+
+    padded = pad_for_noise(wave, rng)  # 앞뒤 빈 구간 (아래에서 잡음으로 덮인다)
 
     clip = clips[rng.integers(len(clips))]  # 환경음 하나를 무작위로
     start = rng.integers(len(clip))  # 그 안에서 시작 위치도 무작위로
@@ -358,6 +363,60 @@ def save_noise_examples(path, out_dir):  # 같은 파일에 SNR별로 잡음을 
     for snr_db in [20, 10, 5]:
         noisy = add_noise(wave, clips, snr_db, np.random.default_rng(SEED))  # 같은 seed → 같은 잡음·빈 구간, SNR만 다르다.
         sf.write(os.path.join(out_dir, f"snr{snr_db}.wav"), noisy, SAMPLE_RATE)
+
+
+# ===============================
+# 2-3. 방 환경 증강 (방 울림 + 핑크 노이즈, 코드로 직접 만든다)
+# ===============================
+
+def pink_noise(length, rng):  # 핑크 노이즈: 저음이 크고 고음으로 갈수록 약해지는 잡음 (방·마이크의 바닥 잡음과 비슷)
+
+    spectrum = np.fft.rfft(rng.standard_normal(length))  # 화이트 노이즈(모든 주파수가 같은 세기)를 주파수로 바꾼다.
+    freqs = np.fft.rfftfreq(length, d=1 / SAMPLE_RATE)  # 각 칸의 주파수(Hz)
+    keep = freqs >= ROOM_NOISE_LOW_HZ  # 귀에 거의 안 들리는 초저음은 뺀다.
+    spectrum[keep] /= np.sqrt(freqs[keep])  # 세기(power)가 1/주파수가 되도록 → 진폭은 1/√주파수. 주파수가 2배면 세기는 절반(-3dB)
+    spectrum[~keep] = 0
+    noise = np.fft.irfft(spectrum, length)  # 다시 소리로
+
+    return (noise / np.sqrt(np.mean(noise ** 2))).astype(np.float32)  # 크기(RMS)를 1로 맞춘다. 실제 크기는 add_room에서 SNR로 정한다.
+
+
+def room_impulse(rt60, drr_db, rng):  # 방의 잔향 응답: "손뼉을 한 번 쳤을 때 마이크에 들리는 소리"
+
+    t = np.arange(1, int(rt60 * SAMPLE_RATE)) / SAMPLE_RATE  # 울림이 이어지는 시간 (직접 들어온 소리 바로 다음부터 RT60까지)
+    tail = rng.standard_normal(len(t)) * np.exp(-np.log(1000) * t / rt60)  # 무작위 반사음이 점점 작아진다. RT60초 뒤에 진폭 1/1000 = -60dB
+    tail *= np.sqrt(10 ** (-drr_db / 10) / np.sum(tail ** 2))  # 울림 전체의 에너지를 "직접 들어온 소리(1)보다 DRR dB 작게" 맞춘다.
+
+    return np.concatenate([[1.0], tail])  # 맨 앞 1 = 입에서 마이크로 바로 들어온 소리, 그 뒤 = 벽에 반사된 울림
+
+
+def add_room(wave, rt60, drr_db, snr_db, rng):  # 방 울림 → 앞뒤 빈 구간 → 핑크 노이즈로 전체 덮기
+
+    wet = fftconvolve(wave, room_impulse(rt60, drr_db, rng)).astype(np.float32)  # 말소리에 방 울림을 입힌다. (끝에 RT60만큼 울림 꼬리가 붙는다)
+    padded = pad_for_noise(wet, rng)  # 앞뒤 빈 구간 (아래에서 핑크 노이즈로 덮인다)
+    noise = pink_noise(len(padded), rng) * active_rms(wet) / 10 ** (snr_db / 20)  # 말소리 크기에 맞춰 SNR dB만큼 작은 바닥 잡음
+
+    return (padded + noise).astype(np.float32)  # 진폭 정규화는 하지 않는다. (원래 방식과 같게)
+
+
+def random_room(wave, rng):  # 방 환경 값들을 범위 안에서 무작위로 골라 입힌다. (학습·평가가 같이 쓴다)
+
+    rt60 = rng.uniform(*ROOM_RT60_RANGE)
+    drr_db = rng.uniform(*ROOM_DRR_RANGE)
+    snr_db = rng.uniform(*ROOM_SNR_RANGE)
+    return add_room(wave, rt60, drr_db, snr_db, rng)
+
+
+def save_room_examples(path, out_dir):  # 같은 파일에 방 환경을 몇 가지로 입혀 저장한다. (직접 들어 보고 확인하기용)
+
+    os.makedirs(out_dir, exist_ok=True)
+    wave = load_audio(path)  # TRIM_SILENCE면 앞뒤 무음이 잘린 말소리
+    sf.write(os.path.join(out_dir, "original.wav"), wave, SAMPLE_RATE)
+    for rt60, drr_db, snr_db in [(ROOM_RT60_RANGE[0], ROOM_DRR_RANGE[1], ROOM_SNR_RANGE[1]),  # 가장 약하게: 작은 방, 마이크 가까이, 조용함
+                                 (ROOM_RT60_RANGE[1], ROOM_DRR_RANGE[0], ROOM_SNR_RANGE[0])]:  # 가장 세게: 넓은 방, 마이크 멀리, 잡음 큼
+        room = add_room(wave, rt60, drr_db, snr_db, np.random.default_rng(SEED))
+        sf.write(os.path.join(out_dir, f"rt{rt60}_drr{drr_db:.0f}_snr{snr_db:.0f}.wav"), room, SAMPLE_RATE, subtype="FLOAT")
+        # 울림이 겹치면 최대 진폭이 1을 조금 넘을 수 있다. 기본(16비트)으로 저장하면 그 부분이 잘려 찌그러지므로 실수 그대로 저장한다. (학습에는 영향 없음)
 
 
 # ===============================
@@ -463,6 +522,12 @@ def build_train(stats_out_path, train_out_path):  # train real → 통계 + 파�
             masks.append(mask)
             file_ids.append(f"{item['file_id']}@noise{snr_db:.0f}")  # 예: LA_T_1138215@noise12 (몇 dB로 섞었는지 남긴다)
 
+        if AUGMENT_ROOM:  # 방 환경 증강: 같은 파일에 방 울림 + 앞뒤 빈 구간 + 핑크 노이즈를 입힌 소리로 하나 더 만든다.
+            logmel, mask = wave_to_input(random_room(wave, rng))
+            raw_logmels.append(logmel)
+            masks.append(mask)
+            file_ids.append(f"{item['file_id']}@room")  # 예: LA_T_1138215@room
+
         if (i + 1) % 500 == 0:  # 500개마다 진행 상황을 출력한다.
             print(f"  {i + 1}/{len(items)}")
 
@@ -559,6 +624,12 @@ if __name__ == "__main__":  # python preprocess.py로 실행했을 때만 아래
         example_dir = os.path.join(PREPROCESS_DIR, "noise_examples")
         save_noise_examples(select_bonafide(TRAIN_DATA)[0]["path"], example_dir)
         print(f"  환경음 예시 저장: {example_dir}")
+
+    print(f"  방 환경 증강: {AUGMENT_ROOM} {f'RT60 {ROOM_RT60_RANGE}초, DRR {ROOM_DRR_RANGE}dB, SNR {ROOM_SNR_RANGE}dB' if AUGMENT_ROOM else ''}")
+    if AUGMENT_ROOM:  # 입힌 소리를 직접 들어 볼 수 있게 예시를 먼저 저장한다.
+        example_dir = os.path.join(PREPROCESS_DIR, "room_examples")
+        save_room_examples(select_bonafide(TRAIN_DATA)[0]["path"], example_dir)
+        print(f"  방 환경 예시 저장: {example_dir}")
 
     stats, example_mel, example_mask = build_train(
         stats_out_path=os.path.join(PREPROCESS_DIR, "mel_stats.pt"),
