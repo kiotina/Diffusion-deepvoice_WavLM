@@ -321,6 +321,10 @@ WEB_DIR = os.path.join(PROJECT_ROOT, "web")  # index.html이 있는 폴더
 FEATURE_MAHA = True  # True면 웹 결과에 "특징 거리"(score_feature)를 함께 낸다. 먼저 python src/feature_maha.py 로 기준값을 만든다.
 FEATURE_MAHA_ROOM = True  # 진짜 음성 무리에 방 환경을 입힌 train real도 넣는다. (방 환경 real 오탐 100% → 0%, 깨끗한 EER 11.14% → 11.64%)
 FEATURE_REFERENCE_PATH = os.path.join(EXPLAIN_DIR, "feature_reference.npz")  # feature_maha.py가 만든 기준값
+# 진짜 음성 무리에 넣을 데이터: 영어만 맞추면 한국어 real을 100% fake로 본다(dev real 500개, 점수 중앙값 9.46 = 영어 fake 수준).
+# 그래서 영어와 한국어 real을 같이 넣어 모델 하나로 두 언어를 받는다. (학습이 없어서 데이터만 더하면 된다)
+FEATURE_MAHA_TRAIN = [TRAIN_DATA, "ko_train"]  # 진짜 음성 무리 (각각 FEATURE_MAHA_ROOM이면 방 환경본도 함께)
+FEATURE_MAHA_DEV = [DEV_DATA, "ko_dev"]  # 임계값을 정할 dev real (합쳐서 95백분위)
 
 DECISION_KEY = "score_feature"  # 웹에서 판정에 쓸 점수 (score_mean, score_max, score_maha, score_feature 중 하나). eval 결과가 가장 좋았던 것으로 바꾼다.
 MAX_UPLOAD_MB = 20  # 업로드 크기 상한
