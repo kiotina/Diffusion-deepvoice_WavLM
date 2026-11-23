@@ -25,6 +25,7 @@
 import csv  # segments.csv, predictions.csv를 쓴다.
 import json  # calibration.json, metrics.json을 쓴다.
 import os  # 파일 경로를 다룬다.
+import zlib  # 파일 ID → 숫자 (잡음 평가에서 파일마다 같은 잡음을 고르는 난수 시작값)
 
 import matplotlib  # 그림을 저장한다.
 matplotlib.use("Agg")  # 창을 띄우지 않고 파일로만 저장한다.
@@ -34,7 +35,7 @@ import torch  # 모델 실행
 from sklearn.metrics import roc_auc_score, roc_curve  # AUROC, ROC 곡선(EER 계산용)
 
 from config import *  # config.py의 모든 설정값을 가져온다.
-from preprocess import cut_segments, file_to_logmel, pad_to_segment, read_protocol  # 음성 → Mel → 조각 (전처리와 똑같이)
+from preprocess import add_noise, cut_segments, load_audio, load_noise_bank, pad_to_segment, read_protocol, wave_to_input  # 음성 → Mel → 조각 (전처리와 똑같이)
 from train import forward_diffusion, make_model  # 모델과 노이즈 섞기 (학습과 똑같이)
 
 TIME_COLUMNS = [f"e_t{t}" for t in SCORE_TIMESTEPS]  # t별 오차 이름: e_t100, e_t300, e_t500 (대역을 평균한 값. 보정용)
@@ -98,9 +99,9 @@ def band_mse(pred, target, mask):  # 구간마다, 주파수 대역마다 masked
 
 
 @torch.no_grad()  # 평가에서는 gradient를 계산하지 않는다.
-def measure_file(model, path, stats, fixed_noises):  # 파일 → 구간마다 t별·대역별 오차 (구간 수, 3 × 8)
+def measure_file(model, wave, stats, fixed_noises):  # waveform → 구간마다 t별·대역별 오차 (구간 수, 3 × 8)
 
-    logmel, mask = file_to_logmel(path, stats)  # 정규화된 log-Mel (80, 프레임 수), mask (프레임 수,)
+    logmel, mask = wave_to_input(wave, stats)  # 정규화된 log-Mel (80, 프레임 수), mask (프레임 수,)
     segments = cut_segments(logmel, mask, hop_frames=INFER_HOP_FRAMES)  # 2초 창을 1초씩 밀며 자른다.
 
     if len(segments) == 0:  # 1초보다 짧은 파일은 조각이 안 나온다.
@@ -182,7 +183,11 @@ def measure_split(model, items, split, stats, fixed_noises, csv_path):  # 파일
             writer.writerow(SEGMENT_COLUMNS)
 
         for i, item in enumerate(todo):  # 파일마다
-            starts, errors = measure_file(model, item["path"], stats, fixed_noises)  # (S, 3)
+            wave = load_audio(item["path"])  # TRIM_SILENCE면 앞뒤 무음이 잘린 말소리
+            if split == "eval" and EVAL_NOISE_SNR is not None:  # 잡음 평가: eval 파일(real·fake 모두)에만 섞는다. dev real은 깨끗한 그대로
+                rng = np.random.default_rng(zlib.crc32(item["file_id"].encode()))  # 파일 ID로 난수를 정한다. → 언제 돌려도, SNR을 바꿔도 같은 잡음·같은 빈 구간
+                wave = add_noise(wave, load_noise_bank(NOISE_EVAL_FOLDS), EVAL_NOISE_SNR, rng)  # 학습 때 들어 본 적 없는 묶음의 잡음
+            starts, errors = measure_file(model, wave, stats, fixed_noises)  # (S, 3)
 
             if i == 0:  # 첫 파일에서 크기와 값을 확인한다.
                 print(f"  첫 파일 {item['file_id']}: 구간 {errors.shape[0]}개, 오차 크기 {errors.shape} (구간 수, t 3 × 대역 {NUM_BANDS})")
@@ -397,7 +402,7 @@ if __name__ == "__main__":  # python evaluate.py로 실행했을 때만 아래�
 
     os.makedirs(EVAL_DIR, exist_ok=True)  # 결과 폴더를 만든다.
     segments_path = os.path.join(EVAL_DIR, "segments.csv")
-    print(f"장치: {DEVICE}, EVAL_LIMIT: {EVAL_LIMIT}")
+    print(f"장치: {DEVICE}, EVAL_LIMIT: {EVAL_LIMIT}, 무음 자르기: {TRIM_SILENCE}, eval 잡음 SNR: {EVAL_NOISE_SNR}")
     print(f"점수용 t: {SCORE_TIMESTEPS}, 노이즈 seed: {SCORE_NOISE_SEEDS}, 창 2초 / hop {INFER_HOP_SEC}초")
 
     model = load_model()

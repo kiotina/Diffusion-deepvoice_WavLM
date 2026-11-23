@@ -17,6 +17,7 @@ import torch  # GPU 사용 가능 여부를 확인하고 난수 시작값을 고
 DATASET_ROOT = r"H:\Workspace\Dataset"  # 모든 데이터셋이 들어 있는 폴더
 LA2019_ROOT = os.path.join(DATASET_ROOT, "LA")  # ASVspoof 2019 LA (train, dev, eval)
 LA2021_ROOT = os.path.join(DATASET_ROOT, "ASVspoof2021_LA_eval")  # ASVspoof 2021 LA (eval만 있다)
+KO_ROOT = os.path.join(DATASET_ROOT, "원천데이터")  # AIHub 한국어 음성 (모두 진짜 사람 음성. 화자마다 폴더 하나)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # src 폴더의 한 칸 위 = 프로젝트 폴더
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "outputs")  # 어디서 실행하든 항상 프로젝트 폴더의 outputs에 저장한다.
 
@@ -47,13 +48,33 @@ DATASETS = {  # 데이터 이름 → 라벨 파일, 음성 폴더, 칸 번호. �
         "audio_dir": os.path.join(LA2021_ROOT, "flac"),
         "columns": COLUMNS_2021,
     },
+    # 한국어 데이터에는 라벨 파일이 없다. 대신 폴더를 뒤져 wav를 모두 찾고(전부 real), 폴더 이름(= 화자)으로 train/dev를 나눈다.
+    # "speakers"에는 화자 폴더 이름의 일부를 적는다. 폴더 이름이 이 중 하나를 포함하면 그 분할에 넣는다.
+    # 화자가 5명뿐이라 dev는 1명이다. real-only 원칙상 임계값은 학습에 안 쓴 화자로 정해야 해서, 1명이라도 따로 뺀다.
+    "ko_train": {
+        "audio_dir": KO_ROOT,
+        "speakers": [
+            "KYG",  # 녹음 부스, TTS 학습용 데이터 (93분, 원래 48kHz → 읽을 때 16kHz로 바꾼다)
+            "1526752256",  # 자유대화, 실내, 남성 (55분)
+            "1527404971",  # 자유대화, 실내, 남성 (65분)
+            "1524374974",  # 자유대화, 실내, 여성 (52분)
+        ],
+    },
+    "ko_dev": {
+        "audio_dir": KO_ROOT,
+        "speakers": [
+            "1536505292",  # 자유대화, 실내, 여성 (60분). 웹에 들어올 음성(일상 녹음)과 비슷한 조건이라 dev로 둔다.
+        ],
+    },
 }
 
+# 영어 모델: TRAIN_DATA = "2019_train", DEV_DATA = "2019_dev", RUN_NAME = "wavlm_l3_trim", TRIM_SILENCE = True (무음 자른 것이 새 기준선. 무음 그대로인 예전 최종 모델은 "wavlm_l3", TRIM_SILENCE = False)
+# 한국어 모델: TRAIN_DATA = "ko_train", DEV_DATA = "ko_dev", RUN_NAME = "wavlm_l3_ko" (한국어 fake가 없어서 eval은 아직 못 한다)
 TRAIN_DATA = "2019_train"  # 학습에 쓸 데이터 (bona fide만 사용)
 DEV_DATA = "2019_dev"  # 검증·보정·임계값에 쓸 데이터 (bona fide만 사용)
 EVAL_DATA = "2019_eval"  # 최종 평가에 쓸 데이터. 평가 데이터를 바꿀 때는 이 이름만 바꾼다.
 
-RUN_NAME = "wavlm_l3"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
+RUN_NAME = "wavlm_l3_trim"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
 RUN_DIR = os.path.join(OUTPUT_DIR, RUN_NAME)  # 이번 실험의 결과 폴더
 
 PREPROCESS_DIR = os.path.join(RUN_DIR, "preprocess")  # 전처리 결과를 저장할 폴더
@@ -114,6 +135,13 @@ MIN_SEGMENT_FRAMES = 1 + int(MIN_SEGMENT_SEC * SAMPLE_RATE) // FRAME_HOP  # 1초
 MASK_SILENCE = True  # True면 무음 프레임도 mask=0으로 만들어 loss와 점수에서 뺀다.
 SILENCE_DB_THRESHOLD = -40.0  # 파일에서 가장 큰 프레임보다 이만큼(dB) 작으면 무음으로 본다.
 
+# 무음 자르기 실험: 음성을 읽자마자 앞뒤 무음을 파형에서 잘라 낸다. (기준은 위의 -40dB와 같다)
+# mask는 무음 프레임을 점수에서 뺄 뿐이고, WavLM은 파일 전체를 보고 특징을 만들기 때문에 무음 정보가 말소리 프레임에 샐 수 있다.
+# 잘라 내면 WavLM이 앞뒤 무음을 아예 못 본다. 그래도 real/fake를 가르면 "무음 길이만 배운 것은 아니다"라는 근거가 된다.
+# 주의: 켠 채로 preprocess.py를 돌리면 학습 데이터도 잘린다. 평가 결과는 evaluation_<데이터>_trim 폴더에 따로 저장된다.
+TRIM_SILENCE = True
+EVAL_DIR += "_trim" if TRIM_SILENCE else ""  # 무음을 잘라 낸 평가는 원래 결과를 덮어쓰지 않게 따로 저장한다.
+
 
 # ===============================
 # 4-1. 코덱 증강 (학습 데이터만. 진짜 음성을 실제 전화 코덱에 통과시킬 뿐 fake는 보지 않는다 → real-only 유지)
@@ -135,6 +163,32 @@ CODEC_SETTINGS = {  # ffmpeg 출력 형식 이름과 코덱이 쓰는 샘플링 
 # 대역 경계를 하나로 못 박지 않고 파일마다 아래 범위에서 무작위로 고른다. (특정 설정만 외우지 않도록)
 PSTN_LOW_HZ_RANGE = (200, 400)  # 낮은 쪽 경계 (Hz)
 PSTN_HIGH_HZ_RANGE = (3000, 3600)  # 높은 쪽 경계 (Hz)
+
+
+# ===============================
+# 4-2. 환경음 증강 (학습 데이터만. 진짜 음성 + 진짜 환경음 → real-only 유지)
+# ===============================
+
+# 2019 real은 모두 조용한 스튜디오 녹음이라, 잡음 섞인 진짜 음성을 "낯설다 = 가짜"로 판단할 수 있다.
+# 그래서 train real마다 원본 1개 + 환경음을 섞은 것 1개를 같이 학습해 "잡음이 섞여도 진짜일 수 있다"를 가르친다.
+# 환경음: ESC-50 (환경음 50종 × 40개, 5초, CC BY-NC 3.0. 출처: github.com/karolpiczak/ESC-50)
+NOISE_ROOT = os.path.join(DATASET_ROOT, "ESC-50")  # audio 폴더와 meta/esc50.csv가 있다.
+AUGMENT_NOISE = False  # True면 위처럼 증강한다.
+NOISE_EXCLUDE = ["crying_baby", "laughing", "coughing", "sneezing", "breathing", "snoring"]  # 목소리 성분이 강한 6종은 뺀다. ("다른 사람 목소리"를 진짜로 배우지 않도록) → 44종 사용
+NOISE_TRAIN_FOLDS = [1, 2, 3, 4]  # 학습 증강에 쓰는 묶음 (1,600개 중 44종 = 1,408개)
+NOISE_EVAL_FOLDS = [5]  # 평가용 잡음 묶음. 학습 때 들어 본 적 없는 잡음으로 시험한다. (352개)
+NOISE_SNR_RANGE = (5.0, 20.0)  # 학습 때 말소리와 잡음의 크기 차이(dB)를 이 범위에서 무작위로 고른다. 작을수록 잡음이 크다.
+
+# 앞뒤 빈 구간: 실제 잡음 환경 녹음은 말 앞뒤에 "잡음만 있는 구간"이 있다. (잡음이 -40dB 기준보다 커서 무음 자르기로 안 잘린다)
+# 그래서 무음을 자른 말소리 앞뒤에 빈 구간을 붙이고 → 그 위에 잡음을 깐다. 빈 구간은 반드시 잡음과 함께만 쓴다.
+# 길이는 파일마다 이 범위에서 무작위로 고르고, real·fake 모두에 같은 규칙을 쓴다. → 길이가 real/fake 단서가 될 수 없다.
+NOISE_PAD_SEC_RANGE = (0.0, 1.0)  # 앞, 뒤 각각 (초)
+
+# 잡음 평가: 숫자를 넣으면 eval 파일(real·fake 모두)에 평가용 잡음을 그 SNR로 섞어서 평가한다. None이면 깨끗한 그대로.
+# dev real은 깨끗한 그대로 둔다. → "깨끗한 real로 정한 임계값이 잡음 환경에서 얼마나 오탐을 내는가"를 잰다.
+# 같은 파일은 언제 돌려도 같은 잡음·SNR·빈 구간이 섞인다. (파일 ID로 난수를 정한다)
+EVAL_NOISE_SNR = None  # 예: 20, 10, 5
+EVAL_DIR += f"_noise{EVAL_NOISE_SNR}" if EVAL_NOISE_SNR is not None else ""  # 잡음 평가는 SNR마다 결과를 따로 저장한다. (예: evaluation_2019_eval_trim_noise10)
 
 
 # ===============================
@@ -200,7 +254,7 @@ THRESHOLD_PERCENTILE = 95  # dev bona fide 점수의 95백분위를 임계값으
 # ===============================
 
 FILE_LIMIT = None  # 숫자를 넣으면 분할마다 앞에서부터 그 개수의 파일만 사용한다. (예: 100)
-EVAL_LIMIT = None  # 숫자를 넣으면 eval에서 무작위로 그 개수만 평가한다. (예: 2000)
+EVAL_LIMIT = 8000  # 숫자를 넣으면 eval에서 무작위로 그 개수만 평가한다. (예: 2000)
 
 
 # ===============================

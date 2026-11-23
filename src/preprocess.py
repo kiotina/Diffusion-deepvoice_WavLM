@@ -14,6 +14,7 @@
 # 이 파일의 함수(load_audio, wave_to_logmel 등)는 evaluate.py에서도 가져다 쓴다.
 # ===============================
 
+import csv  # ESC-50의 파일 목록(esc50.csv)을 읽는다. (환경음 증강)
 import os  # 파일 경로를 다룬다.
 import subprocess  # ffmpeg 프로그램을 실행한다. (코덱 증강)
 
@@ -38,6 +39,10 @@ from config import *  # config.py의 모든 설정값을 가져온다.
 def read_protocol(data_name):  # data_name: config.py의 DATASETS 이름 (예: "2019_train", "2021_eval")
 
     dataset = DATASETS[data_name]  # 라벨 파일, 음성 폴더, 칸 번호
+
+    if "protocol" not in dataset:  # 라벨 파일이 없는 데이터(한국어)는 폴더를 뒤져서 목록을 만든다.
+        return read_folder(data_name)
+
     columns = dataset["columns"]  # 예: {"file_id": 1, "label": 4, ...}
     min_parts = max(columns.values()) + 1  # 필요한 칸이 모두 있으려면 최소 이만큼 조각이 있어야 한다.
 
@@ -63,6 +68,38 @@ def read_protocol(data_name):  # data_name: config.py의 DATASETS 이름 (예: "
     return items  # 파일 정보 목록을 돌려준다.
 
 
+def read_folder(data_name):  # 라벨 파일 없이 폴더 안의 wav를 모두 real로 읽는다. (한국어 데이터용)
+
+    dataset = DATASETS[data_name]  # 음성 폴더, 이 분할에 넣을 화자 목록
+    items = []  # read_protocol과 같은 모양의 파일 정보 목록
+
+    for folder, sub_folders, files in os.walk(dataset["audio_dir"]):  # 음성 폴더 아래의 모든 폴더를 하나씩 본다.
+        sub_folders.sort()  # 폴더를 이름순으로 돌아서, 언제 실행해도 파일 순서가 같게 한다.
+        speaker_id = os.path.basename(folder)  # 화자마다 폴더 하나라서 폴더 이름을 화자 ID로 쓴다.
+
+        if not any(key in speaker_id for key in dataset["speakers"]):  # 이 분할의 화자가 아니면
+            continue  # 건너뛴다. (train 화자가 dev에 섞이지 않게)
+
+        for name in sorted(files):  # 파일 이름순으로
+            if not name.lower().endswith(".wav"):  # wav가 아닌 파일은 건너뛴다.
+                continue
+            items.append({
+                "path": os.path.join(folder, name),  # 음성 파일 경로
+                "speaker_id": speaker_id,  # 화자 ID (폴더 이름)
+                "file_id": os.path.splitext(name)[0],  # 파일 ID (확장자를 뺀 이름. 화자 이름이 들어 있어 겹치지 않는다)
+                "attack_id": "-",  # 공격 없음
+                "label": "bonafide",  # 모두 진짜 사람 음성
+            })
+
+    if len(items) == 0:  # 하나도 못 찾았으면 폴더 경로나 화자 이름이 잘못된 것이다.
+        raise ValueError(f"{data_name}: wav를 하나도 찾지 못했다. config.py의 audio_dir와 speakers를 확인할 것")
+
+    speakers = sorted({item["speaker_id"] for item in items})  # 실제로 들어간 화자들
+    print(f"[{data_name}] 화자 {len(speakers)}명, 파일 {len(items)}개: {speakers}")  # 화자가 의도대로 나뉘었는지 확인한다.
+
+    return items
+
+
 # ===============================
 # 2. 음성 → log-Mel
 # ===============================
@@ -75,6 +112,14 @@ def load_audio(path):  # 음성 파일 하나를 읽는다.
         mono=True,  # 모노로 맞춘다.
     )
     # 진폭 정규화는 하지 않는다. 합성 흔적(아티팩트)을 지울 수 있어서.
+
+    if TRIM_SILENCE:  # 무음 자르기 실험일 때만
+        wave, _ = librosa.effects.trim(  # 앞뒤에서 가장 큰 소리보다 40dB 이상 작은 부분을 잘라 낸다. (가운데 쉼은 그대로)
+            wave,
+            top_db=-SILENCE_DB_THRESHOLD,  # 40: 무음 mask와 같은 기준
+            frame_length=WIN_LENGTH,  # 25ms 창으로 소리 크기를 잰다.
+            hop_length=WIN_LENGTH // 2,  # 12.5ms씩 옮긴다.
+        )
 
     return wave.astype(np.float32)  # 32비트 실수로 돌려준다.
 
@@ -248,6 +293,74 @@ def save_codec_examples(path, out_dir):  # 같은 파일을 원본과 학습 코
 
 
 # ===============================
+# 2-2. 환경음 증강 (학습: NOISE_TRAIN_FOLDS, 잡음 평가: NOISE_EVAL_FOLDS)
+# ===============================
+
+NOISE_BANK = {}  # 묶음 번호들 → 환경음 목록. 처음 한 번만 읽는다.
+
+
+def active_rms(wave):  # 소리가 있는 부분만의 크기 (ESC-50은 소리가 짧으면 뒤를 디지털 무음으로 채워 둔 파일이 많다)
+
+    rms = librosa.feature.rms(y=wave, frame_length=WIN_LENGTH, hop_length=WIN_LENGTH // 2, center=False)[0]  # 25ms 창마다 크기
+    if rms.max() == 0:  # 완전히 0인 소리
+        return 0.0
+    active = rms[rms > rms.max() * 10 ** (SILENCE_DB_THRESHOLD / 20)]  # 가장 큰 곳보다 40dB 이상 작은 부분(무음)은 뺀다.
+    # 무음까지 넣어 크기를 재면, 무음이 긴 잡음일수록 실제 소리보다 작게 재져서 섞을 때 너무 크게 키우게 된다.
+
+    return float(np.sqrt(np.mean(active ** 2)))  # 소리 있는 부분의 평균 크기 (RMS)
+
+
+def load_noise_bank(folds):  # ESC-50에서 이 묶음들의 환경음을 읽는다. (목소리 성분이 강한 NOISE_EXCLUDE 6종은 뺀다)
+
+    key = tuple(folds)
+    if key not in NOISE_BANK:  # 처음 부를 때만 파일을 읽는다.
+        clips = []
+        with open(os.path.join(NOISE_ROOT, "meta", "esc50.csv"), "r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):  # 한 줄 = 환경음 파일 하나 (filename, fold, category, …)
+                if int(row["fold"]) not in folds or row["category"] in NOISE_EXCLUDE:
+                    continue
+                clip, _ = librosa.load(os.path.join(NOISE_ROOT, "audio", row["filename"]), sr=SAMPLE_RATE, mono=True)  # 44.1kHz → 16kHz
+                if active_rms(clip) > 0:  # 완전히 조용한 파일은 잡음으로 쓸 수 없다.
+                    clips.append(clip.astype(np.float32))
+        NOISE_BANK[key] = clips
+        print(f"환경음 묶음 {list(folds)}: {len(clips)}개 (제외한 종류 {len(NOISE_EXCLUDE)}개)")
+
+    return NOISE_BANK[key]
+
+
+def add_noise(wave, clips, snr_db, rng):  # 말소리 앞뒤에 무작위 길이의 빈 구간을 붙이고, 전체에 환경음을 SNR에 맞춰 섞는다.
+
+    pad_front = int(rng.uniform(*NOISE_PAD_SEC_RANGE) * SAMPLE_RATE)  # 앞 빈 구간 길이 (샘플)
+    pad_back = int(rng.uniform(*NOISE_PAD_SEC_RANGE) * SAMPLE_RATE)  # 뒤 빈 구간 길이 (앞과 따로 고른다)
+    padded = np.concatenate([np.zeros(pad_front, np.float32), wave, np.zeros(pad_back, np.float32)])
+    # 빈 구간은 아래에서 잡음으로 덮인다. 잡음 없이 빈 구간만 붙이면 무음 길이가 다시 단서가 되므로 절대 따로 쓰지 않는다.
+
+    clip = clips[rng.integers(len(clips))]  # 환경음 하나를 무작위로
+    start = rng.integers(len(clip))  # 그 안에서 시작 위치도 무작위로
+    noise = np.resize(np.roll(clip, -start), len(padded))  # 시작 위치부터 읽고, 길이가 모자라면 처음으로 돌아가 이어 붙인다.
+
+    speech_rms = active_rms(wave)  # 말소리 크기 (앞뒤 빈 구간을 붙이기 전, 말소리만으로 잰다)
+    noise_rms = active_rms(clip)  # 잡음 크기는 잘라 낸 조각이 아니라 환경음 파일 전체에서 잰다. (소리 있는 부분만)
+    # 짧은 조각이 하필 그 파일의 무음 부분에 걸리면 조각의 크기가 0이 되어 나눌 수 없다. 파일 전체로 재면 항상 0보다 크다.
+    # 그래서 "띄엄띄엄 나는 소리"(개 짖는 소리 등)는 말소리 구간과 안 겹칠 수도 있다. 실제 녹음에서도 그렇다.
+    noise = noise * (speech_rms / noise_rms) / 10 ** (snr_db / 20)  # SNR(dB) = 20·log10(말소리 크기 / 잡음 크기)가 되도록 잡음 크기를 맞춘다.
+    # 말소리 크기에 맞춰 잡음을 키우거나 줄이므로, real·fake의 원래 음량이 달라도 같은 SNR이면 같은 비율로 섞인다.
+
+    return (padded + noise).astype(np.float32)  # 진폭 정규화는 하지 않는다. (원래 방식과 같게)
+
+
+def save_noise_examples(path, out_dir):  # 같은 파일에 SNR별로 잡음을 섞어 저장한다. (직접 들어 보고 확인하기용)
+
+    os.makedirs(out_dir, exist_ok=True)
+    wave = load_audio(path)  # TRIM_SILENCE면 앞뒤 무음이 잘린 말소리
+    clips = load_noise_bank(NOISE_TRAIN_FOLDS)
+    sf.write(os.path.join(out_dir, "original.wav"), wave, SAMPLE_RATE)
+    for snr_db in [20, 10, 5]:
+        noisy = add_noise(wave, clips, snr_db, np.random.default_rng(SEED))  # 같은 seed → 같은 잡음·빈 구간, SNR만 다르다.
+        sf.write(os.path.join(out_dir, f"snr{snr_db}.wav"), noisy, SAMPLE_RATE)
+
+
+# ===============================
 # 3. 2초 조각으로 자르기
 # ===============================
 
@@ -327,6 +440,7 @@ def build_train(stats_out_path, train_out_path):  # train real → 통계 + 파�
 
     raw_logmels, masks, file_ids = [], [], []  # 정규화 전 Mel, mask, 파일 ID
     rng = np.random.default_rng(SEED)  # 파일마다 어떤 코덱을 입힐지(와 pstn 대역 경계를) 고르는 난수. 언제 돌려도 같은 선택
+    noise_clips = load_noise_bank(NOISE_TRAIN_FOLDS) if AUGMENT_NOISE else None  # 학습용 환경음 (평가용 묶음은 쓰지 않는다)
 
     for i, item in enumerate(items):  # 파일마다
         wave = load_audio(item["path"])  # 음성을 한 번만 읽어서 원본과 증강본에 같이 쓴다.
@@ -341,6 +455,13 @@ def build_train(stats_out_path, train_out_path):  # train real → 통계 + 파�
             raw_logmels.append(logmel)
             masks.append(mask)
             file_ids.append(f"{item['file_id']}@{augment}")  # 예: LA_T_1138215@alaw (어떤 코덱을 입혔는지 남긴다)
+
+        if AUGMENT_NOISE:  # 환경음 증강: 같은 파일에 앞뒤 빈 구간 + 환경음을 섞은 소리로 하나 더 만든다.
+            snr_db = rng.uniform(*NOISE_SNR_RANGE)  # 파일마다 SNR을 무작위로
+            logmel, mask = wave_to_input(add_noise(wave, noise_clips, snr_db, rng))
+            raw_logmels.append(logmel)
+            masks.append(mask)
+            file_ids.append(f"{item['file_id']}@noise{snr_db:.0f}")  # 예: LA_T_1138215@noise12 (몇 dB로 섞었는지 남긴다)
 
         if (i + 1) % 500 == 0:  # 500개마다 진행 상황을 출력한다.
             print(f"  {i + 1}/{len(items)}")
@@ -432,6 +553,12 @@ if __name__ == "__main__":  # python preprocess.py로 실행했을 때만 아래
         example_dir = os.path.join(PREPROCESS_DIR, "codec_examples")
         save_codec_examples(select_bonafide(TRAIN_DATA)[0]["path"], example_dir)
         print(f"  코덱 예시 저장: {example_dir}")
+
+    print(f"  환경음 증강: {AUGMENT_NOISE} {f'SNR {NOISE_SNR_RANGE}dB, 앞뒤 빈 구간 {NOISE_PAD_SEC_RANGE}초' if AUGMENT_NOISE else ''}")
+    if AUGMENT_NOISE:  # 섞은 소리를 직접 들어 볼 수 있게 예시를 먼저 저장한다.
+        example_dir = os.path.join(PREPROCESS_DIR, "noise_examples")
+        save_noise_examples(select_bonafide(TRAIN_DATA)[0]["path"], example_dir)
+        print(f"  환경음 예시 저장: {example_dir}")
 
     stats, example_mel, example_mask = build_train(
         stats_out_path=os.path.join(PREPROCESS_DIR, "mel_stats.pt"),
