@@ -68,13 +68,13 @@ DATASETS = {  # 데이터 이름 → 라벨 파일, 음성 폴더, 칸 번호. �
     },
 }
 
-# 영어 모델: TRAIN_DATA = "2019_train", DEV_DATA = "2019_dev", RUN_NAME = "wavlm_l3_trim", TRIM_SILENCE = True (무음 자른 것이 새 기준선. 무음 그대로인 예전 최종 모델은 "wavlm_l3", TRIM_SILENCE = False)
-# 한국어 모델: TRAIN_DATA = "ko_train", DEV_DATA = "ko_dev", RUN_NAME = "wavlm_l3_ko" (한국어 fake가 없어서 eval은 아직 못 한다)
+# 영어 모델: TRAIN_DATA = "2019_train", DEV_DATA = "2019_dev", RUN_NAME = "wavlm_l3_trim_room", TRIM_SILENCE = True, AUGMENT_ROOM = True (무음 자르기 + 방 환경 증강이 현재 최종. 증강 없는 기준선은 "wavlm_l3_trim", 무음 그대로인 예전 모델은 "wavlm_l3", TRIM_SILENCE = False)
+# 한국어 모델: TRAIN_DATA = "ko_train", DEV_DATA = "ko_dev", RUN_NAME = "wavlm_l3_trim_room_ko", TRIM_SILENCE = True, AUGMENT_ROOM = True (영어 최종과 같은 방식. 예전 무음 그대로 버전은 "wavlm_l3_ko". 한국어 fake가 없어서 eval은 아직 못 한다)
 TRAIN_DATA = "2019_train"  # 학습에 쓸 데이터 (bona fide만 사용)
 DEV_DATA = "2019_dev"  # 검증·보정·임계값에 쓸 데이터 (bona fide만 사용)
 EVAL_DATA = "2019_eval"  # 최종 평가에 쓸 데이터. 평가 데이터를 바꿀 때는 이 이름만 바꾼다.
 
-RUN_NAME = "wavlm_l3_trim"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
+RUN_NAME = "wavlm_l3_trim_room"  # 실험 이름. 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다. (첫 실험: "baseline")
 RUN_DIR = os.path.join(OUTPUT_DIR, RUN_NAME)  # 이번 실험의 결과 폴더
 
 PREPROCESS_DIR = os.path.join(RUN_DIR, "preprocess")  # 전처리 결과를 저장할 폴더
@@ -121,6 +121,13 @@ WAVLM_LAYER = 3  # 몇 번째 층의 특징을 쓸지 (0 = CNN 출력, 1~12 = Tr
 WAVLM_DIM = 768  # 특징 하나의 길이 (wavlm-base-plus는 768)
 WAVLM_HOP = 320  # WavLM 특징 한 프레임 = 320샘플 = 20ms (모델 구조로 정해진 값)
 
+# 다른 음성 모델로 바꾸기: 이름·층·차원 세 줄만 바꾸면 된다. (FEATURE_TYPE은 "wavlm" 그대로. 프레임 간격 20ms도 같다)
+#   wav2vec 2.0 XLS-R 300M: WAVLM_MODEL_NAME = "facebook/wav2vec2-xls-r-300m", WAVLM_LAYER = 22, WAVLM_DIM = 1024
+#     128개 언어 real 음성 43만 시간으로 미리 학습. 24층 중 22층은 디퓨전 없이 마할라노비스로 거른 결과
+#     (무음 자름, 2019 eval 8,000개: EER 11.14%, Base+ 3층은 28.37%)로 고른 값이다. 보고할 때 밝힌다.
+#   입력을 파일마다 평균 0·표준편차 1로 맞춰 넣을지는 모델마다 다르다. (XLS-R, WavLM Large는 맞추고 Base+는 안 맞춘다)
+#   preprocess.py가 모델과 함께 받는 설정(do_normalize)을 읽어서 자동으로 따른다.
+
 FRAME_HOP = WAVLM_HOP if FEATURE_TYPE == "wavlm" else HOP_LENGTH  # 프레임 하나가 몇 샘플씩 떨어져 있는지 (Mel·스펙트로그램 256, WavLM 320)
 N_BINS = {"mel": N_MELS, "spec": N_FFT // 2, "wavlm": WAVLM_DIM}[FEATURE_TYPE]  # 모델에 들어가는 세로 칸 수. 스펙트로그램은 257칸 중 맨 위 한 칸(8kHz)을 버리고 256칸을 쓴다. (2D U-Net은 두 번 반으로 줄이므로 4로 나눠떨어져야 한다)
 
@@ -141,6 +148,13 @@ SILENCE_DB_THRESHOLD = -40.0  # 파일에서 가장 큰 프레임보다 이만�
 # 주의: 켠 채로 preprocess.py를 돌리면 학습 데이터도 잘린다. 평가 결과는 evaluation_<데이터>_trim 폴더에 따로 저장된다.
 TRIM_SILENCE = True
 EVAL_DIR += "_trim" if TRIM_SILENCE else ""  # 무음을 잘라 낸 평가는 원래 결과를 덮어쓰지 않게 따로 저장한다.
+
+# 소리 크기 맞추기: 음성을 읽자마자 가장 큰 진폭이 1.0이 되도록 전체를 같은 비율로 키우거나 줄인다.
+# ASVspoof 2019는 train·dev·eval, real·fake 모두 이미 최대 진폭이 1.0이라 영어 결과는 바뀌지 않는다.
+# 웹 녹음(마이크 거리에 따라 작게 들어옴)과 AIHub(파일마다 0.2~0.9)는 크기가 제각각이라 맞춰 준다.
+# 소리 전체에 같은 숫자를 곱할 뿐이라 음색(합성 흔적)은 바뀌지 않는다. (파일별 Mel 정규화와는 다르다)
+# 확인: 2019 eval real을 최대 진폭 0.03으로 줄이면 real 오탐이 4.0% → 48.7%로 오른다.
+NORMALIZE_PEAK = True
 
 
 # ===============================
@@ -202,7 +216,7 @@ EVAL_DIR += f"_noise{EVAL_NOISE_SNR}" if EVAL_NOISE_SNR is not None else ""  # �
 #      화이트 노이즈는 고음까지 똑같이 덮는데, 고음은 합성 흔적이 많은 곳이라 쓰지 않는다.
 # 둘 다 코드로 직접 만든다. (내려받을 데이터 없음)
 # 순서: 무음 자르기 → 방 울림 → 앞뒤 빈 구간(NOISE_PAD_SEC_RANGE, 4-2와 같은 규칙) → 핑크 노이즈로 전체 덮기
-AUGMENT_ROOM = False  # True면 train real마다 원본 1개 + 방 환경을 입힌 것 1개를 같이 학습한다.
+AUGMENT_ROOM = True  # True면 train real마다 원본 1개 + 방 환경을 입힌 것 1개를 같이 학습한다.
 ROOM_RT60_RANGE = (0.15, 0.6)  # 울림 길이(초): 소리가 60dB 작아질 때까지 걸리는 시간. 0.15 = 작은 방, 0.6 = 거실 정도
 ROOM_DRR_RANGE = (5.0, 15.0)  # 직접 들어온 소리와 울림의 크기 차이(dB). 클수록 마이크가 입에 가깝다. (폰·노트북을 앞에 두고 말하는 정도)
 ROOM_SNR_RANGE = (25.0, 40.0)  # 말소리와 바닥 잡음의 크기 차이(dB). 배경에 살짝 깔리는 정도 (환경음 증강은 5~20dB였다)

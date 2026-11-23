@@ -868,7 +868,8 @@ function drawAll() {
   const player = $("player");
   drawTimeline(ctx, W, H, {
     r, view: state.view, overlay: state.overlay, showMel: true,
-    playhead: player.src && (player.currentTime > 0 || !player.paused) ? player.currentTime : null,
+    playhead: player.src && (player.currentTime > 0 || !player.paused) ? player.currentTime - (r.trim_offset || 0) : null,  // 재생은 원래 녹음, 그림은 앞 무음을 잘라 낸 분석 시간
+
     hoverX: state.hover,
   });
   document.querySelectorAll(".sr-chart").forEach((cv) => {
@@ -911,7 +912,7 @@ viewer.addEventListener("click", (e) => {
   const rect = viewer.getBoundingClientRect(), lay = timelineLayout(rect.width, 360, true);
   const t = (e.clientX - rect.left - lay.L) / lay.pw * r.duration;
   if (t < 0 || t > r.duration) return;
-  player.currentTime = t;
+  player.currentTime = t + (r.trim_offset || 0);  // 분석 시간 → 원래 녹음 시간 (앞에서 잘라 낸 무음만큼 더한다)
   player.play().catch(() => {});
 });
 const player = $("player");
@@ -1034,7 +1035,7 @@ async function buildReport() {
     <dt>대상</dt><dd>${esc(target)}</dd>
     <dt>보고서 작성</dt><dd>${esc(nowText())}</dd>
     <dt>파일 지문</dt><dd style="grid-column: span 3">${esc(fingerprint)}</dd>
-    <dt>분석 길이</dt><dd>${fmt(r.duration, 2)}초${r.original_duration > r.duration + 0.01 ? ` (원래 ${fmt(r.original_duration, 1)}초 중 앞부분)` : ""}</dd>
+    <dt>분석 길이</dt><dd>${fmt(r.duration, 2)}초${r.original_duration > r.duration + 0.01 ? ` (원래 ${fmt(r.original_duration, 1)}초${r.trim_offset !== undefined ? ", 앞뒤 무음 제외" : " 중 앞부분"})` : ""}</dd>
     <dt>모델</dt><dd>${esc(m.run_name)} · epoch ${m.checkpoint_epoch}</dd>
   </dl>
 

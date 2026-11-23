@@ -36,7 +36,7 @@ import torch  # 모델 실행
 from config import *  # config.py의 모든 설정값
 from evaluate import (SCORE_KEYS, TIME_COLUMNS, calibrate, fit_real_distribution,  # 점수 계산을 evaluate.py와 똑같이 한다.
                       load_stats, make_fixed_noises, time_errors)
-from preprocess import cut_segments, load_audio, make_silence_mask, pad_to_segment, read_protocol, wave_to_input  # 전처리를 학습 때와 똑같이 한다.
+from preprocess import cut_segments, load_audio, make_silence_mask, normalize_peak, pad_to_segment, read_protocol, trim_silence, wave_to_input  # 전처리를 학습 때와 똑같이 한다.
 from train import forward_diffusion, make_model  # 모델과 노이즈 섞기
 
 NOTE_Z = 1.0  # t별 평균 z가 이보다 크거나(-이보다 작으면) 요약 문장에서 "차이가 있다"고 말한다. (실험하면서 조정)
@@ -311,7 +311,7 @@ def inspect_audio(wave, source_info, original_sec, truncated):  # real-only 모�
     if clip_ratio > 0.001:
         notes.append({"level": "warn", "text": f"소리가 깨진(클리핑) 샘플이 {clip_ratio * 100:.2f}% 있습니다."})
     if peak < 0.05:
-        notes.append({"level": "warn", "text": f"소리가 매우 작습니다. (최대 진폭 {peak:.3f})"})
+        notes.append({"level": "warn", "text": f"소리가 매우 작습니다. (최대 진폭 {peak:.3f}) 크기는 맞춰서 분석하지만, 배경 잡음도 같이 커지므로 마이크에 더 가까이 대고 녹음하는 편이 좋습니다."})
     if silence_ratio > 0.5:
         notes.append({"level": "warn", "text": f"무음 비율이 {silence_ratio * 100:.0f}%로 높아 분석에 쓸 수 있는 구간이 적습니다."})
 
@@ -432,7 +432,7 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
     def model_card(self):  # 화면과 보고서에 적을 모델 정보
 
         feature = {
-            "wavlm": f"WavLM {WAVLM_LAYER}층 특징 ({WAVLM_MODEL_NAME})",
+            "wavlm": f"{WAVLM_MODEL_NAME} {WAVLM_LAYER}층 특징",
             "mel": f"log-Mel {N_MELS}칸",
             "spec": f"log 스펙트로그램 {N_BINS}칸",
         }[FEATURE_TYPE]
@@ -462,17 +462,28 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
     def analyze_wave(self, wave, source_info=None):  # 16kHz 모노 waveform → 판정과 설명 (dict)
 
         original_sec = len(wave) / SAMPLE_RATE
+        if float(np.abs(wave).max()) == 0.0:
+            raise ValueError("소리가 없는 파일입니다.")
+
+        trim_offset = 0.0  # 앞에서 잘라 낸 무음 길이(초). 웹에서 재생 위치를 맞출 때 쓴다.
+        if TRIM_SILENCE:  # 학습·평가 때처럼 앞뒤 무음을 잘라 낸다. (load_audio와 같은 함수)
+            wave, start = trim_silence(wave)
+            trim_offset = start / SAMPLE_RATE
+
         max_samples = int(MAX_AUDIO_SEC * SAMPLE_RATE)
         truncated = len(wave) > max_samples
         if truncated:
             wave = wave[:max_samples]  # 앞부분만 분석한다.
 
         if len(wave) < MIN_AUDIO_SEC * SAMPLE_RATE:
-            raise ValueError(f"음성이 너무 짧습니다. {MIN_AUDIO_SEC:g}초 이상이어야 합니다.")
-        if float(np.abs(wave).max()) == 0.0:
-            raise ValueError("소리가 없는 파일입니다.")
+            raise ValueError(f"음성이 너무 짧습니다. 앞뒤 무음을 빼고 {MIN_AUDIO_SEC:g}초 이상이어야 합니다.")
 
         quality, notes = inspect_audio(wave, source_info, original_sec, truncated)
+        if TRIM_SILENCE:
+            notes.append({"level": "info", "text": f"학습 때처럼 앞뒤 무음을 잘라 내고 {len(wave) / SAMPLE_RATE:.1f}초만 분석했습니다. (원래 {original_sec:.1f}초)"})
+        if NORMALIZE_PEAK:  # 학습 때처럼 소리 크기를 맞춘다. (quality의 최대 진폭은 맞추기 전 원래 값)
+            notes.append({"level": "info", "text": f"학습 때처럼 소리 크기를 맞춰(최대 진폭 {quality['peak']:.2f} → 1.0) 분석했습니다."})
+            wave = normalize_peak(wave)
 
         features, mask = wave_to_input(wave, self.stats)  # 학습 때와 같은 특징·mask·정규화
         if mask.sum() == 0:
@@ -481,9 +492,9 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
         x, masks, starts = prepare_segments(features, mask)
         errors = frame_band_errors(self.model, x, self.fixed_noises)  # (S, 3, 대역, F)
 
-        return self.build_result(wave, features.shape[1], errors, masks, starts, quality, notes, original_sec)
+        return self.build_result(wave, features.shape[1], errors, masks, starts, quality, notes, original_sec, trim_offset)
 
-    def build_result(self, wave, num_frames, errors, masks, starts, quality, notes, original_sec):  # 오차 → 점수·설명 (모델 없이 numpy만)
+    def build_result(self, wave, num_frames, errors, masks, starts, quality, notes, original_sec, trim_offset=0.0):  # 오차 → 점수·설명 (모델 없이 numpy만)
 
         duration = quality["duration"]
 
@@ -553,6 +564,7 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
             "flags": flags,
             "duration": duration,
             "original_duration": original_sec,
+            "trim_offset": trim_offset,  # 분석 시간 0초 = 원래 녹음의 trim_offset초 (웹 재생 위치 맞추기)
             "segment_sec": SEGMENT_SEC,
             "segment_threshold": segment_threshold,
             "segments": segments,

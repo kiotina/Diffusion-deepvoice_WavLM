@@ -27,7 +27,7 @@ import numpy as np  # 숫자 배열을 계산한다.
 import soundfile as sf  # 코덱 증강 예시를 wav 파일로 저장한다. (직접 들어 보기용)
 import torch  # 결과를 PyTorch 텐서로 저장한다.
 from scipy.signal import butter, fftconvolve, sosfilt  # pstn 흉내: 일부 대역만 통과시키는 필터 / 방 울림: 말소리에 잔향 응답을 입힌다.
-from transformers import WavLMModel  # 미리 학습된 WavLM을 불러온다. (FEATURE_TYPE = "wavlm"일 때만 쓴다)
+from transformers import AutoFeatureExtractor, AutoModel  # 미리 학습된 음성 모델(WavLM, wav2vec2)을 이름으로 불러온다. (FEATURE_TYPE = "wavlm"일 때만 쓴다)
 
 from config import *  # config.py의 모든 설정값을 가져온다.
 
@@ -111,17 +111,32 @@ def load_audio(path):  # 음성 파일 하나를 읽는다.
         sr=SAMPLE_RATE,  # 16kHz로 맞춘다. (이미 16kHz면 그대로)
         mono=True,  # 모노로 맞춘다.
     )
-    # 진폭 정규화는 하지 않는다. 합성 흔적(아티팩트)을 지울 수 있어서.
+    # 파일별 Mel 정규화 같은 "음색을 바꾸는" 정규화는 하지 않는다. 합성 흔적(아티팩트)을 지울 수 있어서.
 
     if TRIM_SILENCE:  # 무음 자르기 실험일 때만
-        wave, _ = librosa.effects.trim(  # 앞뒤에서 가장 큰 소리보다 40dB 이상 작은 부분을 잘라 낸다. (가운데 쉼은 그대로)
-            wave,
-            top_db=-SILENCE_DB_THRESHOLD,  # 40: 무음 mask와 같은 기준
-            frame_length=WIN_LENGTH,  # 25ms 창으로 소리 크기를 잰다.
-            hop_length=WIN_LENGTH // 2,  # 12.5ms씩 옮긴다.
-        )
+        wave, _ = trim_silence(wave)
+
+    if NORMALIZE_PEAK:  # 소리 크기만 맞춘다. (ASVspoof는 이미 1.0이라 그대로)
+        wave = normalize_peak(wave)
 
     return wave.astype(np.float32)  # 32비트 실수로 돌려준다.
+
+
+def normalize_peak(wave):  # 가장 큰 진폭이 1.0이 되도록 전체에 같은 숫자를 곱한다. 웹 분석도 이 함수를 쓴다.
+
+    peak = float(np.abs(wave).max())
+    return wave / peak if peak > 0 else wave  # 완전히 0인 소리는 그대로 둔다.
+
+
+def trim_silence(wave):  # 앞뒤 무음을 잘라 낸다. 반환: (잘린 소리, 앞에서 잘라 낸 길이(샘플)). 웹 분석도 이 함수를 쓴다.
+
+    trimmed, (start, _) = librosa.effects.trim(  # 앞뒤에서 가장 큰 소리보다 40dB 이상 작은 부분을 잘라 낸다. (가운데 쉼은 그대로)
+        wave,
+        top_db=-SILENCE_DB_THRESHOLD,  # 40: 무음 mask와 같은 기준
+        frame_length=WIN_LENGTH,  # 25ms 창으로 소리 크기를 잰다.
+        hop_length=WIN_LENGTH // 2,  # 12.5ms씩 옮긴다.
+    )
+    return trimmed, int(start)  # start: 웹에서 원래 녹음과 분석 결과의 시간을 맞출 때 쓴다.
 
 
 def wave_to_logmel(wave):  # waveform → log-Mel 또는 log 스펙트로그램 (N_BINS, 프레임 수)
@@ -155,18 +170,21 @@ def wave_to_logmel(wave):  # waveform → log-Mel 또는 log 스펙트로그램 
 WAVLM = {}  # 불러온 WavLM을 담아 둘 곳. 파일마다 다시 불러오지 않도록 처음 한 번만 채운다.
 
 
-def wave_to_wavlm(wave):  # waveform → WavLM 특징 (768, 프레임 수)
+def wave_to_wavlm(wave):  # waveform → 음성 모델 특징 (WAVLM_DIM, 프레임 수). WavLM, wav2vec2 모두 이 함수를 쓴다.
 
     if "model" not in WAVLM:  # 처음 부를 때만
-        WAVLM["model"] = WavLMModel.from_pretrained(WAVLM_MODEL_NAME).to(DEVICE).eval()  # 미리 학습된 가중치를 받아 GPU에 올린다. (학습하지 않고 그대로 쓴다)
-        print(f"WavLM 불러옴: {WAVLM_MODEL_NAME}, {WAVLM_LAYER}층 사용")
+        WAVLM["model"] = AutoModel.from_pretrained(WAVLM_MODEL_NAME).to(DEVICE).eval()  # 이름에 맞는 모델(WavLM, wav2vec2)을 불러와 GPU에 올린다. (학습하지 않고 그대로 쓴다)
+        WAVLM["normalize"] = AutoFeatureExtractor.from_pretrained(WAVLM_MODEL_NAME).do_normalize  # 사전학습 때 입력을 정규화했는지
+        print(f"음성 모델 불러옴: {WAVLM_MODEL_NAME}, {WAVLM_LAYER}층 사용, 입력 정규화 {WAVLM['normalize']}")
 
-    x = torch.from_numpy(wave)[None].to(DEVICE)  # (1, 샘플 수). wavlm-base-plus는 진폭 정규화 없이 waveform을 그대로 받는다.
-    with torch.no_grad():  # WavLM은 학습하지 않는다.
+    if WAVLM["normalize"]:  # XLS-R 등: 사전학습 때처럼 파일마다 평균 0, 표준편차 1로 맞춰 넣는다. (Hugging Face 전처리와 같은 식)
+        wave = (wave - wave.mean()) / np.sqrt(wave.var() + 1e-7)
+    x = torch.from_numpy(wave.astype(np.float32))[None].to(DEVICE)  # (1, 샘플 수). wavlm-base-plus는 waveform을 그대로 받는다.
+    with torch.no_grad():  # 음성 모델은 학습하지 않는다.
         out = WAVLM["model"](x, output_hidden_states=True)  # 모든 층의 출력을 받는다.
-    hidden = out.hidden_states[WAVLM_LAYER][0]  # (프레임 수, 768): 고른 층의 출력. 20ms마다 768개 숫자
+    hidden = out.hidden_states[WAVLM_LAYER][0]  # (프레임 수, WAVLM_DIM): 고른 층의 출력. 20ms마다 숫자 WAVLM_DIM개
 
-    return hidden.T.cpu().numpy().astype(np.float32)  # (768, 프레임 수): Mel과 같은 (세로 칸, 프레임) 모양으로 맞춘다.
+    return hidden.T.cpu().numpy().astype(np.float32)  # (WAVLM_DIM, 프레임 수): Mel과 같은 (세로 칸, 프레임) 모양으로 맞춘다.
 
 
 def make_silence_mask(wave, num_frames):  # 무음 프레임은 0, 소리 있는 프레임은 1
