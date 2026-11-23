@@ -386,11 +386,13 @@ const signed = (v, d = 2) => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(d);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const DEMO = new URLSearchParams(location.search).has("demo");  // ?demo=1: 서버 없이 예시 데이터로 화면만 본다.
 
-const KEYS = ["score_mean", "score_max", "score_maha"];
+const KEYS = ["score_feature", "score_mean", "score_max", "score_maha"];
+const keysOf = (r) => KEYS.filter((k) => r.scores[k] !== undefined);  // 이 결과에 들어 있는 점수만 (특징 거리가 꺼져 있으면 3가지)
 const KEY_INFO = {
-  score_mean: { name: "평균 이상도", desc: "구간 z-점수의 평균" },
-  score_max: { name: "최대 구간 이상도", desc: "가장 의심스러운 2초 구간" },
-  score_maha: { name: "분포 거리", desc: "진짜 음성 분포와의 Mahalanobis 거리" },
+  score_feature: { name: "특징 거리", desc: "XLS-R 특징이 진짜 음성 범위에서 떨어진 정도 (디퓨전 없음)" },
+  score_mean: { name: "평균 이상도", desc: "디퓨전: 구간 z-점수의 평균" },
+  score_max: { name: "최대 구간 이상도", desc: "디퓨전: 가장 의심스러운 2초 구간" },
+  score_maha: { name: "분포 거리", desc: "디퓨전: 오차 분포와의 Mahalanobis 거리" },
 };
 const C = { ink: "#111827", muted: "#6b7280", faint: "#9ca3af", line: "#e5e7eb", grid: "#eef0f3", spoof: "#dc2626", real: "#15803d", low: "#2563eb", accent: "#4338ca" };
 
@@ -602,10 +604,10 @@ function renderVerdict(r) {
   $("verdict-icon").innerHTML = ICONS[r.verdict];
   $("verdict-label").textContent = v.label;
   $("verdict-sub").textContent = v.sub;
-  const flagged = KEYS.filter((k) => r.flags[k]).length;
-  $("verdict-meta").textContent = `판정 기준: ${KEY_INFO[r.decision_key].name} · 점수 3가지 중 ${flagged}가지가 임계값을 넘음 · 분석 길이 ${fmt(r.duration, 1)}초`;
+  const flagged = keysOf(r).filter((k) => r.flags[k]).length;
+  $("verdict-meta").textContent = `판정 기준: ${KEY_INFO[r.decision_key].name} · 점수 ${keysOf(r).length}가지 중 ${flagged}가지가 임계값을 넘음 · 분석 길이 ${fmt(r.duration, 1)}초`;
 
-  $("scores").innerHTML = KEYS.map((k) => `
+  $("scores").innerHTML = keysOf(r).map((k) => `
     <div class="score-row">
       <div class="sr-name"><b>${KEY_INFO[k].name}${k === r.decision_key ? '<em class="tag">판정 기준</em>' : ""}</b><span>${KEY_INFO[k].desc}</span></div>
       <canvas class="sr-chart" data-key="${k}"></canvas>
@@ -1012,8 +1014,8 @@ async function buildReport() {
   }
 
   const timeImg = chartImage(680, opt.mel ? 330 : 190, (c, w, h) => drawTimeline(c, w, h, { r, view: "all", overlay: true, showMel: opt.mel, playhead: null, hoverX: null }));
-  const distImg = chartImage(680, 110, (c, w, h) => KEYS.forEach((k, i) => {
-    c.save(); c.translate(i * (w / 3) + (i ? 8 : 0), 0); drawDist(c, w / 3 - 16, h, r, k, true); c.restore();
+  const distImg = chartImage(680, 110, (c, w, h) => keysOf(r).forEach((k, i, ks) => {
+    c.save(); c.translate(i * (w / ks.length) + (i ? 8 : 0), 0); drawDist(c, w / ks.length - 16, h, r, k, true); c.restore();
   }));
 
   const included = [opt.name && "파일 이름", opt.hash && "파일 지문(SHA-256)", opt.mel && "Mel 그림"].filter(Boolean);
@@ -1047,7 +1049,7 @@ async function buildReport() {
     <h2><span>1</span>점수와 판정</h2>
     <table>
       <tr><th>점수</th><th>의미</th><th class="n">값</th><th class="n">임계값</th><th class="n">진짜 음성 대비</th><th>결과</th></tr>
-      ${KEYS.map((k) => `<tr><td>${KEY_INFO[k].name}${k === r.decision_key ? " (판정 기준)" : ""}</td><td>${KEY_INFO[k].desc}</td>
+      ${keysOf(r).map((k) => `<tr><td>${KEY_INFO[k].name}${k === r.decision_key ? " (판정 기준)" : ""}</td><td>${KEY_INFO[k].desc}</td>
         <td class="n">${fmt(r.scores[k], 3)}</td><td class="n">${fmt(r.thresholds[k], 3)}</td><td class="n">상위 ${fmt(100 - r.percentiles[k], 1)}%</td>
         <td class="${r.flags[k] ? "hit" : "ok"}">${r.flags[k] ? "임계값 넘음" : "임계값 이하"}</td></tr>`).join("")}
     </table>
@@ -1197,8 +1199,9 @@ function makeDemo() {
   };
   const hists = { score_mean: hist(-0.25, 0.42, -1.6, 1.6), score_max: hist(0.35, 0.5, -0.9, 2.6), score_maha: hist(1.4, 0.55, 0.1, 3.8) };
   const pct = (k) => { const h = hists[k], tot = h.counts.reduce((a, b) => a + b, 0); return 100 * h.counts.reduce((a, c, i) => a + (h.edges[i + 1] <= scores[k] ? c : 0), 0) / tot; };
-  const percentiles = Object.fromEntries(KEYS.map((k) => [k, pct(k)]));
-  const flags = Object.fromEntries(KEYS.map((k) => [k, scores[k] > thresholds[k]]));
+  const demoKeys = KEYS.filter((k) => k in scores);  // 예시 결과에는 디퓨전 점수 3가지만 있다.
+  const percentiles = Object.fromEntries(demoKeys.map((k) => [k, pct(k)]));
+  const flags = Object.fromEntries(demoKeys.map((k) => [k, scores[k] > thresholds[k]]));
   const tMean = [0, 1, 2].map((j) => segments.reduce((a, s) => a + s.z_t[j], 0) / segments.length);
   const top = segments[ss.indexOf(scores.score_max)];
   const melHz = Array.from({ length: 64 }, (_, i) => { const mm = 2595 * Math.log10(1 + 8000 / 700) * (i + 1) / 65; return Math.round(700 * (10 ** (mm / 2595) - 1)); });
@@ -1230,7 +1233,7 @@ function makeDemo() {
   const spans = merged.map(([a, b]) => `${a.toFixed(1)}–${b.toFixed(1)}초`).join(", ");
   r.summary = [
     r.verdict === "spoof" ? `판정 기준인 평균 이상도가 임계값보다 높아(${fmt(r.score)} > ${fmt(r.threshold)}) 진짜 음성과 다른 패턴으로 판단했습니다.` : `판정 기준인 평균 이상도가 임계값 이하라서(${fmt(r.score)} ≤ ${fmt(r.threshold)}) 진짜 음성 범위 안에 있습니다.`,
-    `점수 3가지 중 ${KEYS.filter((k) => flags[k]).length}가지가 임계값을 넘었습니다.`,
+    `점수 3가지 중 ${demoKeys.filter((k) => flags[k]).length}가지가 임계값을 넘었습니다.`,
     `개발용 진짜 음성 2548개와 비교하면 ${fmt(r.percentile, 1)}%가 이 파일보다 평균 이상도가 낮습니다.`,
     spans ? `구간 기준(1.20)을 넘은 구간: ${spans}. 가장 높은 구간은 ${top.start.toFixed(1)}–${top.end.toFixed(1)}초(구간 점수 ${fmt(top.score)})입니다.` : "구간 기준(1.20)을 넘은 구간은 없습니다.",
     `노이즈 단계로 보면 t=100에서 오차가 진짜 음성보다 가장 크게 벌어졌습니다(평균 z ${signed(tMean[0])}).`,

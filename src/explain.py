@@ -38,16 +38,18 @@ from evaluate import (SCORE_KEYS, TIME_COLUMNS, calibrate, fit_real_distribution
                       load_stats, make_fixed_noises, time_errors)
 from preprocess import cut_segments, load_audio, make_silence_mask, normalize_peak, pad_to_segment, read_protocol, trim_silence, wave_to_input  # 전처리를 학습 때와 똑같이 한다.
 from train import forward_diffusion, make_model  # 모델과 노이즈 섞기
+from feature_maha import distance, load_reference, pooled_feature  # 특징 거리 점수 (판정용)
 
 NOTE_Z = 1.0  # t별 평균 z가 이보다 크거나(-이보다 작으면) 요약 문장에서 "차이가 있다"고 말한다. (실험하면서 조정)
-KEY_NAMES = {"score_mean": "평균 이상도", "score_max": "최대 구간 이상도", "score_maha": "분포 거리"}  # 화면·문장에 쓰는 점수 이름
+KEY_NAMES = {"score_mean": "평균 이상도", "score_max": "최대 구간 이상도", "score_maha": "분포 거리", "score_feature": "특징 거리"}  # 화면·문장에 쓰는 점수 이름
+WEB_KEYS = SCORE_KEYS + (["score_feature"] if FEATURE_MAHA else [])  # 웹에 내는 점수: 디퓨전 점수 3가지 + 특징 거리(feature_maha.py)
 MIN_AUDIO_SEC = 0.5  # 이보다 짧으면 분석하지 않는다. (WavLM은 최소 400샘플이 필요하고, 너무 짧으면 의미가 없다)
 LOSSY_CODECS = {"mp3", "aac", "opus", "vorbis", "amr_nb", "amr_wb", "wmav1", "wmav2", "ac3", "gsm", "gsm_ms"}  # 손실 압축 (ffmpeg 이름)
 LOSSY_EXTS = {"mp3", "m4a", "aac", "mp4", "ogg", "oga", "opus", "webm", "amr", "wma", "3gp"}  # 코덱을 모를 때 확장자로 판단
 
 FRAME_SEC = FRAME_HOP / SAMPLE_RATE  # 모델 프레임 간격(초): WavLM 0.02
 FRAME_OFFSET_SEC = (WIN_LENGTH / 2 / SAMPLE_RATE) if FEATURE_TYPE == "wavlm" else 0.0  # WavLM 프레임 i는 [320i, 320i+400) 샘플을 본다 → 중심이 12.5ms 뒤
-TRAIN_DESC = "ASVspoof 2019 LA 진짜 음성, 스튜디오 녹음" + (", 전화 코덱 증강 포함" if AUGMENT_CODEC else "")  # 경고 문장에 쓰는 학습 데이터 설명
+TRAIN_DESC = "ASVspoof 2019 LA 진짜 음성, 스튜디오 녹음" + (", 전화 코덱 증강 포함" if AUGMENT_CODEC else "") + (", 방 환경 증강 포함" if AUGMENT_ROOM else "")  # 경고 문장에 쓰는 학습 데이터 설명
 
 
 # ===============================
@@ -342,13 +344,13 @@ def make_summary(r):  # 숫자로부터 규칙에 따라 문장을 만든다. (�
     else:
         lines.append(f"판정 기준인 {name}가 임계값 이하라서({r['score']:.2f} ≤ {r['threshold']:.2f}) 진짜 음성 범위 안에 있습니다.")
 
-    flagged = [KEY_NAMES[k] for k in SCORE_KEYS if r["flags"][k]]
-    if len(flagged) == len(SCORE_KEYS):
-        lines.append(f"점수 {len(SCORE_KEYS)}가지 모두 임계값을 넘었습니다.")
+    flagged = [KEY_NAMES[k] for k in WEB_KEYS if r["flags"][k]]
+    if len(flagged) == len(WEB_KEYS):
+        lines.append(f"점수 {len(WEB_KEYS)}가지 모두 임계값을 넘었습니다.")
     elif len(flagged) == 0:
-        lines.append(f"점수 {len(SCORE_KEYS)}가지 모두 임계값 이하입니다.")
+        lines.append(f"점수 {len(WEB_KEYS)}가지 모두 임계값 이하입니다.")
     else:
-        lines.append(f"점수 {len(SCORE_KEYS)}가지 중 {len(flagged)}가지가 임계값을 넘었습니다({', '.join(flagged)}).")
+        lines.append(f"점수 {len(WEB_KEYS)}가지 중 {len(flagged)}가지가 임계값을 넘었습니다({', '.join(flagged)}).")
 
     lines.append(f"개발용 진짜 음성 {r['reference']['num_dev_files']}개와 비교하면 {r['percentile']:.1f}%가 이 파일보다 {name}가 낮습니다.")
 
@@ -405,6 +407,17 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
         self.frame_mean = np.array(ref["frame_calibration"]["mean"])[:, None]  # (3, 1)
         self.frame_std = np.array(ref["frame_calibration"]["std"])[:, None]
         self.dev_scores = {key: np.array(values) for key, values in ref["dev_scores"].items()}
+
+        if FEATURE_MAHA:  # 특징 거리 기준값 (python src/feature_maha.py 가 만든다)
+            if not os.path.exists(FEATURE_REFERENCE_PATH):
+                raise FileNotFoundError(f"특징 거리 기준값이 없습니다: {FEATURE_REFERENCE_PATH}\n먼저 python src/feature_maha.py 를 실행하세요.")
+            self.feature_ref = load_reference()
+            meta = str(self.feature_ref["meta"])
+            if not meta.startswith(f"{WAVLM_MODEL_NAME}|{WAVLM_LAYER}|"):  # 다른 모델·층으로 만든 기준값이면 점수가 조용히 틀어진다.
+                raise RuntimeError(f"특징 거리 기준값의 모델·층이 지금 설정과 다릅니다: {meta}\npython src/feature_maha.py 를 다시 실행하세요.")
+            self.thresholds["score_feature"] = float(self.feature_ref["threshold"])
+            self.dev_scores["score_feature"] = self.feature_ref["dev_scores"]
+
         self.hists = {}
         for key, values in self.dev_scores.items():  # 화면의 분포 그림용
             counts, edges = np.histogram(values, bins=40)
@@ -442,6 +455,8 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
             "feature_type": FEATURE_TYPE,
             "feature": feature,
             "network": "1D U-Net 디퓨전(DDPM)" if FEATURE_TYPE == "wavlm" else "2D U-Net 디퓨전(DDPM)",
+            "decision_method": "특징 거리(마할라노비스, 디퓨전 없음)" if DECISION_KEY == "score_feature" else "디퓨전 노이즈 예측 오차",  # 무엇으로 판정했는지
+            "room_augment": AUGMENT_ROOM,
             "checkpoint_epoch": self.checkpoint["epoch"],
             "train_data": TRAIN_DATA,
             "dev_data": DEV_DATA,
@@ -492,9 +507,13 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
         x, masks, starts = prepare_segments(features, mask)
         errors = frame_band_errors(self.model, x, self.fixed_noises)  # (S, 3, 대역, F)
 
-        return self.build_result(wave, features.shape[1], errors, masks, starts, quality, notes, original_sec, trim_offset)
+        feature_score = None
+        if FEATURE_MAHA:  # 판정용 특징 거리. 음성 모델을 한 번 더 돌리지만(위 wave_to_input에서 한 번), 웹에서는 파일 하나라 빠르다.
+            feature_score = float(distance(pooled_feature(wave), self.feature_ref)[0])
 
-    def build_result(self, wave, num_frames, errors, masks, starts, quality, notes, original_sec, trim_offset=0.0):  # 오차 → 점수·설명 (모델 없이 numpy만)
+        return self.build_result(wave, features.shape[1], errors, masks, starts, quality, notes, original_sec, trim_offset, feature_score)
+
+    def build_result(self, wave, num_frames, errors, masks, starts, quality, notes, original_sec, trim_offset=0.0, feature_score=None):  # 오차 → 점수·설명 (모델 없이 numpy만)
 
         duration = quality["duration"]
 
@@ -513,8 +532,10 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
             "score_max": float(seg_scores.max()),
             "score_maha": float(np.sqrt(maha_sq)),
         }
-        flags = {key: bool(scores[key] > self.thresholds[key]) for key in SCORE_KEYS}
-        percentiles = {key: float((self.dev_scores[key] < scores[key]).mean() * 100) for key in SCORE_KEYS}
+        if feature_score is not None:
+            scores["score_feature"] = feature_score  # 특징 거리 (디퓨전을 쓰지 않는 판정용 점수)
+        flags = {key: bool(scores[key] > self.thresholds[key]) for key in WEB_KEYS}
+        percentiles = {key: float((self.dev_scores[key] < scores[key]).mean() * 100) for key in WEB_KEYS}
 
         # ----- 설명 1: 시간 (구간 점수, 프레임 z) -----
         segment_threshold = self.thresholds["score_max"]  # dev real 파일의 "가장 높은 구간"의 95백분위 = 구간 하나가 낯선지 보는 기준
