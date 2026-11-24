@@ -55,7 +55,7 @@ def load_rdm():  # best.pt → (모델, 표준화 평균, 표준편차)
 def make_fixed_noises():  # 모든 파일이 똑같은 노이즈 16개로 시험을 본다. (파일마다 운이 달라지지 않도록)
 
     generator = torch.Generator().manual_seed(SEED)
-    return torch.randn((RDM_NOISE_COUNT, XLSR_DIM), generator=generator).to(DEVICE)  # (16, 1024)
+    return torch.randn((RDM_NOISE_COUNT, RDM_INPUT_DIM), generator=generator).to(DEVICE)  # (16, 입력 크기)
 
 
 # ===============================

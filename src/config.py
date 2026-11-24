@@ -235,15 +235,22 @@ THRESHOLD_PERCENTILE = 95  # dev bona fide 파일 점수의 95백분위를 임�
 # 프레임마다 디퓨전을 돌리면 오차가 "그 순간 소리가 얼마나 복잡한가"에 흔들렸다(EER 20%). 파일 평균으로 그 흔들림을 없앤다. (EER 11%)
 XLSR_MODEL = "facebook/wav2vec2-xls-r-300m"  # 사전학습 음성 모델 (128개 언어, 약 3억 가중치). 처음 실행 때 내려받는다.
 XLSR_LAYER = 22  # 24층 중 몇 번째 층을 쓸지. 19~24층 중 22층 (층 후보는 eval을 본 비교에서 나왔다 → 발표 때 밝힌다)
-XLSR_DIM = 1024  # XLS-R 한 층의 특징 차원 = 디퓨전 입력 크기
+XLSR_DIM = 1024  # XLS-R 한 층의 특징 차원
+# 프레임들을 파일 벡터 하나로 묶는 방법
+#   "mean"     : 프레임 평균 (1024). "이 파일의 평균적인 목소리 성질"
+#   "mean_std" : 평균 + 표준편차 (2048). 표준편차 = 프레임마다 얼마나 흔들리나. TTS가 사람보다 "너무 매끈한지"를 보려고 (B 실험)
+#                → 실패 (2019 EER 27.73%, ASVspoof 5 AUROC 0.850으로 둘 다 나빠짐. 2026-11-25)
+RDM_POOLING = "mean"
+RDM_INPUT_DIM = XLSR_DIM * (2 if RDM_POOLING == "mean_std" else 1)  # 디퓨전 입력 크기
 # 파일 벡터는 데이터·증강마다 이 폴더에 한 번만 뽑아 두고, 여러 모델이 나눠 쓴다. (예: 2019_train_clean.npz, ko_train_aug.npz)
-RDM_FEATURE_DIR = os.path.join(OUTPUT_DIR, f"rdm_features_xlsr_l{XLSR_LAYER}")
+RDM_FEATURE_DIR = os.path.join(OUTPUT_DIR, f"rdm_features_xlsr_l{XLSR_LAYER}" + ("_meanstd" if RDM_POOLING == "mean_std" else ""))
 
 # 모델 두 개 (논문용 = 영어, 시연용 = 영어 + 한국어 + 증강). 아래 세 줄만 바꿔서 고른다.
 #   영어:  RDM_RUN_NAME = "rdm_xlsr_l22",       RDM_TRAIN_DATA = ["2019_train"], RDM_DEV_DATA = ["2019_dev"], RDM_AUGMENT = False  (EER 11.49%)
 #   시연:  RDM_RUN_NAME = "rdm_xlsr_l22_multi", 아래 값
 #   시연(이전): RDM_RUN_NAME = "rdm_xlsr_l22_multi", LibriSpeech 없이 (2019 EER 14.13%, ASVspoof 5 오탐 61.6%)
-RDM_RUN_NAME = "rdm_xlsr_l22_multi_libri"  # 결과 폴더 이름 (outputs/<RDM_RUN_NAME>/)
+#   + LibriSpeech(평균만): RDM_RUN_NAME = "rdm_xlsr_l22_multi_libri", RDM_POOLING = "mean" (2019 EER 16.75%, ASVspoof 5 17.92%)
+RDM_RUN_NAME = "rdm_xlsr_l22_multi_libri" + ("_meanstd" if RDM_POOLING == "mean_std" else "")  # 결과 폴더 이름 (outputs/<RDM_RUN_NAME>/)
 RDM_TRAIN_DATA = ["2019_train", "ko_train", "kspon_train", "libri_train"]  # 학습할 real (영어 스튜디오 + 한국어 + 영어 오디오북)
 RDM_DEV_DATA = ["2019_dev", "ko_dev", "kspon_dev", "libri_dev"]  # 조기 종료·보정·임계값용 real (학습에 안 쓴 화자들, 깨끗한 그대로)
 RDM_AUGMENT = True  # True면 학습 real마다 증강본 하나를 더한다. (방 환경 또는 배속 중 무작위 하나)

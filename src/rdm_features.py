@@ -1,6 +1,6 @@
 # ===============================
 # rdm_features.py
-# 음성 파일 하나 → XLS-R 22층 특징 → 프레임 평균 = 파일 벡터 하나(1024)로 바꿔서 저장한다.
+# 음성 파일 하나 → XLS-R 22층 특징 → 프레임 평균(+ 표준편차) = 파일 벡터 하나(1024 또는 2048)로 바꿔서 저장한다. (RDM_POOLING)
 # 이 벡터가 RDM 디퓨전(rdm_train.py)의 입력이다. XLS-R은 학습하지 않고 숫자로 바꾸는 일만 한다.
 #
 # 만드는 파일 (outputs/rdm_features_xlsr_l22 폴더, 데이터·증강마다 하나. 이미 있으면 다시 만들지 않는다)
@@ -51,7 +51,12 @@ def file_vector(wave, extractor, model):  # load_audio를 거친 waveform → XL
         out = model(x, output_hidden_states=True)  # 모든 층의 출력을 받는다.
     frames = out.hidden_states[XLSR_LAYER][0]  # (프레임 수, 1024): 22층 출력. 20ms마다 벡터 하나 (0번은 CNN 출력, 1~24번이 Transformer 층)
 
-    return frames.mean(dim=0).float().cpu().numpy()  # 프레임 평균 → (1024,): "이 파일 전체의 성질"만 남긴다.
+    mean = frames.mean(dim=0)  # (1024,): 프레임 평균 = "이 파일 전체의 성질"
+    if RDM_POOLING == "mean_std":  # 표준편차도 붙인다 → (2048,)
+        std = frames.std(dim=0)  # (1024,): 차원마다 프레임끼리 얼마나 흔들리나 (작을수록 "매끈함")
+        return torch.cat([mean, std]).float().cpu().numpy()
+
+    return mean.float().cpu().numpy()
 
 
 def select_extra_eval(name):  # RDM_EXTRA_EVAL 데이터: 라벨 파일 중 실제로 내려받아 둔, 코덱 없는 파일만
@@ -136,6 +141,6 @@ if __name__ == "__main__":
         build_split(select_bonafide(name), name, "clean", extractor, model)
     eval_items = select_eval_items()  # eval 8,000개 (real + fake)
     build_split(eval_items, EVAL_DATA, "clean", extractor, model)
-    build_split(eval_items, EVAL_DATA, "room", extractor, model)  # 같은 파일에 방 환경을 입힌 것
     for name in RDM_EXTRA_EVAL:  # 최신 공격 확인용 (ASVspoof 5)
         build_split(select_extra_eval(name), name, "clean", extractor, model)
+    build_split(eval_items, EVAL_DATA, "room", extractor, model)  # 같은 파일에 방 환경을 입힌 것 (가장 오래 걸려서 마지막에)

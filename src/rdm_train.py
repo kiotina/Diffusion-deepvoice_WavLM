@@ -79,12 +79,12 @@ class RDM(nn.Module):  # 노이즈 섞인 벡터 x_t (B, 1024)와 t (B,) → 예
             nn.SiLU(),
             nn.Linear(TIME_EMBEDDING_DIM, TIME_EMBEDDING_DIM),
         )
-        self.inp = nn.Linear(XLSR_DIM, RDM_HIDDEN)  # 1024 → 1024 (입력을 안쪽 공간으로)
+        self.inp = nn.Linear(RDM_INPUT_DIM, RDM_HIDDEN)  # 입력(1024 또는 2048) → 1024 (입력을 안쪽 공간으로)
         self.blocks = nn.ModuleList([MLPBlock() for _ in range(RDM_BLOCKS)])  # 블록 3개
         self.out = nn.Sequential(  # 안쪽 공간 → 노이즈 예측 (1024)
             nn.LayerNorm(RDM_HIDDEN),
             nn.SiLU(),
-            nn.Linear(RDM_HIDDEN, XLSR_DIM),
+            nn.Linear(RDM_HIDDEN, RDM_INPUT_DIM),  # 다시 입력 크기로
         )
 
     def forward(self, x, t):
@@ -105,7 +105,7 @@ def make_val_problem(num):  # dev real 벡터마다 t 하나와 노이즈 하나
 
     generator = torch.Generator().manual_seed(VAL_SEED)  # 학습 난수와 섞지 않는 전용 난수
     t = select_random_timesteps(num, generator=generator)  # (dev 수,)
-    noise = torch.randn((num, XLSR_DIM), generator=generator).to(DEVICE)  # (dev 수, 1024)
+    noise = torch.randn((num, RDM_INPUT_DIM), generator=generator).to(DEVICE)  # (dev 수, 입력 크기)
 
     return t, noise
 
