@@ -10,7 +10,7 @@
 # 읽는 파일: outputs/rdm_features_xlsr_l22/ 의 dev·eval 벡터 (rdm_features.py), checkpoints/best.pt (rdm_train.py)
 # 만드는 파일 (outputs/<RDM_RUN_NAME>/evaluation_<EVAL_DATA> 폴더)
 #   calibration.json : dev real로 정한 t별 평균·표준편차와 임계값 (웹 서버도 이 값을 쓴다)
-#   metrics_<clean|room>.json, predictions_<clean|room>.csv, score_hist_<clean|room>.png
+#   metrics_<데이터>_<clean|room>.json, predictions_..., score_hist_... (EVAL_DATA clean·room, RDM_EXTRA_EVAL clean)
 #                    : 깨끗한 eval, 방 환경을 입힌 eval 각각의 지표·파일별 판정·점수 분포
 #   test_samples.csv : 시험지 파일마다 점수와 판정
 # ===============================
@@ -170,17 +170,18 @@ if __name__ == "__main__":
         print(f"  {source:18s} {len(part):5d}개 | 점수 중앙값 {np.median(part):6.2f} | 오탐 {np.mean(part > calibration['threshold']) * 100:4.1f}%")
 
     # ----- eval: 여기서 처음 fake를 본다. 깨끗한 그대로, 방 환경을 입힌 것 -----
-    for variant in ["clean", "room"]:
-        data = load_many([EVAL_DATA], (variant,))
+    eval_sets = [(EVAL_DATA, "clean"), (EVAL_DATA, "room")] + [(name, "clean") for name in RDM_EXTRA_EVAL]  # (데이터, 증강)
+    for eval_name, variant in eval_sets:
+        data = load_many([eval_name], (variant,))
         scores = file_scores(measure_errors(model, standardize(data["vectors"], mean, std), noises), calibration)
         results = [{"label": l, "attack_id": a, "score": s} for l, a, s in zip(data["label"], data["attack_id"], scores)]
         metrics = compute_metrics(results, "score", calibration["threshold"])
-        with open(os.path.join(EVAL_DIR_RDM, f"metrics_{variant}.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(EVAL_DIR_RDM, f"metrics_{eval_name}_{variant}.json"), "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2, ensure_ascii=False)
-        save_predictions(data, scores, calibration["threshold"], os.path.join(EVAL_DIR_RDM, f"predictions_{variant}.csv"))
-        save_score_hist(scores, data["label"], calibration["threshold"], os.path.join(EVAL_DIR_RDM, f"score_hist_{variant}.png"))
+        save_predictions(data, scores, calibration["threshold"], os.path.join(EVAL_DIR_RDM, f"predictions_{eval_name}_{variant}.csv"))
+        save_score_hist(scores, data["label"], calibration["threshold"], os.path.join(EVAL_DIR_RDM, f"score_hist_{eval_name}_{variant}.png"))
 
-        print(f"\n{EVAL_DATA} {variant} ({len(scores)}개) | EER {metrics['eer'] * 100:.2f}% | AUROC {metrics['auroc']:.4f} | "
+        print(f"\n{eval_name} {variant} ({len(scores)}개) | EER {metrics['eer'] * 100:.2f}% | AUROC {metrics['auroc']:.4f} | "
               f"오탐률 {metrics['false_alarm_rate'] * 100:.1f}% | 탐지율 {metrics['detection_rate'] * 100:.1f}%")
         print("  공격별 AUROC: " + " ".join(f"{a[1:]}:{m['auroc']:.2f}" for a, m in metrics["per_attack"].items()))
 

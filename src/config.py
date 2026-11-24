@@ -46,6 +46,13 @@ DATASETS = {  # 데이터 이름 → 라벨 파일, 음성 폴더, 칸 번호. �
         "audio_dir": os.path.join(LA2021_ROOT, "flac"),
         "columns": COLUMNS_2021,
     },
+    # ASVspoof 5 (2024): 최신 TTS·음성 변환 공격 16종(A17~A32). 평가에만 쓴다. eval 음성 중 일부(12,159개)만 내려받아 두었다.
+    # 라벨 한 줄: "E_1607 E_0009538969 M C05 2 E_0009486171 AC1 A26 spoof -" (codec이 "-"면 코덱을 거치지 않은 깨끗한 파일)
+    "5_eval": {
+        "protocol": os.path.join(DATASET_ROOT, "ASVspoof5", "ASVspoof5.eval.track_1.tsv"),
+        "audio_dir": os.path.join(DATASET_ROOT, "ASVspoof5", "flac_E_eval"),
+        "columns": {"speaker_id": 0, "file_id": 1, "codec": 3, "attack_id": 7, "label": 8},
+    },
     # 한국어 데이터에는 라벨 파일이 없다. 폴더를 뒤져 wav를 모두 찾고(전부 real), 폴더 이름(= 화자)으로 train/dev를 나눈다.
     # "speakers"에는 화자 폴더 이름의 일부를 적는다. 폴더 이름이 이 중 하나를 포함하면 그 데이터에 넣는다.
     "ko_train": {
@@ -63,6 +70,11 @@ DATASETS = {  # 데이터 이름 → 라벨 파일, 음성 폴더, 칸 번호. �
     },
     "kspon_train": {"audio_dir": os.path.join(KSPON_WAV_DIR, "train"), "speakers": ["KsponSpeech_"]},  # 세션 폴더 = 화자 자리
     "kspon_dev": {"audio_dir": os.path.join(KSPON_WAV_DIR, "dev"), "speakers": ["eval_"]},  # eval_clean, eval_other (train과 다른 화자)
+    # LibriSpeech: 영어 오디오북 낭독 (LibriVox). 스튜디오(2019)·대화(한국어)와 다른 녹음 조건의 real을 더한다.
+    # Hugging Face(openslr/librispeech_asr)에서 받아 화자/챕터 폴더에 flac으로 풀었다. dev-clean과 test-clean은 화자가 겹치지 않는다. (각 40명)
+    # 주의: ASVspoof 5의 real도 LibriVox 오디오북(MLS)이라 같은 계열이다. ASVspoof 5 오탐이 줄면 "녹음 조건을 맞춘 효과"라고 밝힌다.
+    "libri_train": {"audio_dir": os.path.join(DATASET_ROOT, "LibriSpeech", "dev-clean"), "speakers": [""]},  # 2,703문장 (""는 모든 폴더)
+    "libri_dev": {"audio_dir": os.path.join(DATASET_ROOT, "LibriSpeech", "test-clean"), "speakers": [""]},  # 2,620문장
 }
 
 TRAIN_DATA = "2019_train"  # 학습에 쓸 데이터 (bona fide만 사용)
@@ -230,10 +242,12 @@ RDM_FEATURE_DIR = os.path.join(OUTPUT_DIR, f"rdm_features_xlsr_l{XLSR_LAYER}")
 # 모델 두 개 (논문용 = 영어, 시연용 = 영어 + 한국어 + 증강). 아래 세 줄만 바꿔서 고른다.
 #   영어:  RDM_RUN_NAME = "rdm_xlsr_l22",       RDM_TRAIN_DATA = ["2019_train"], RDM_DEV_DATA = ["2019_dev"], RDM_AUGMENT = False  (EER 11.49%)
 #   시연:  RDM_RUN_NAME = "rdm_xlsr_l22_multi", 아래 값
-RDM_RUN_NAME = "rdm_xlsr_l22_multi"  # 결과 폴더 이름 (outputs/<RDM_RUN_NAME>/)
-RDM_TRAIN_DATA = ["2019_train", "ko_train", "kspon_train"]  # 학습할 real (영어 + 한국어)
-RDM_DEV_DATA = ["2019_dev", "ko_dev", "kspon_dev"]  # 조기 종료·보정·임계값용 real (학습에 안 쓴 화자들, 깨끗한 그대로)
+#   시연(이전): RDM_RUN_NAME = "rdm_xlsr_l22_multi", LibriSpeech 없이 (2019 EER 14.13%, ASVspoof 5 오탐 61.6%)
+RDM_RUN_NAME = "rdm_xlsr_l22_multi_libri"  # 결과 폴더 이름 (outputs/<RDM_RUN_NAME>/)
+RDM_TRAIN_DATA = ["2019_train", "ko_train", "kspon_train", "libri_train"]  # 학습할 real (영어 스튜디오 + 한국어 + 영어 오디오북)
+RDM_DEV_DATA = ["2019_dev", "ko_dev", "kspon_dev", "libri_dev"]  # 조기 종료·보정·임계값용 real (학습에 안 쓴 화자들, 깨끗한 그대로)
 RDM_AUGMENT = True  # True면 학습 real마다 증강본 하나를 더한다. (방 환경 또는 배속 중 무작위 하나)
+RDM_EXTRA_EVAL = ["5_eval"]  # EVAL_DATA 말고 더 평가할 데이터. 내려받아 둔 파일 중 코덱을 거치지 않은 깨끗한 것만 쓴다. (최신 TTS 확인용)
 RDM_DIR = os.path.join(OUTPUT_DIR, RDM_RUN_NAME)
 
 RDM_HIDDEN = 1024  # MLP 안쪽 크기

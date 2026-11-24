@@ -22,7 +22,7 @@ from transformers import AutoFeatureExtractor, AutoModel  # Hugging Face에서 X
 
 from config import *  # config.py의 모든 설정값을 가져온다.
 from evaluate import select_eval_items  # 지금까지 비교에 쓴 eval 8,000개 표본 (seed 고정)
-from preprocess import add_room, augment, load_audio, select_bonafide  # 음성 읽기와 증강 (다른 실험과 똑같이)
+from preprocess import add_room, augment, load_audio, read_protocol, select_bonafide  # 음성 읽기와 증강 (다른 실험과 똑같이)
 
 
 # ===============================
@@ -52,6 +52,15 @@ def file_vector(wave, extractor, model):  # load_audio를 거친 waveform → XL
     frames = out.hidden_states[XLSR_LAYER][0]  # (프레임 수, 1024): 22층 출력. 20ms마다 벡터 하나 (0번은 CNN 출력, 1~24번이 Transformer 층)
 
     return frames.mean(dim=0).float().cpu().numpy()  # 프레임 평균 → (1024,): "이 파일 전체의 성질"만 남긴다.
+
+
+def select_extra_eval(name):  # RDM_EXTRA_EVAL 데이터: 라벨 파일 중 실제로 내려받아 둔, 코덱 없는 파일만
+
+    have = set(os.listdir(DATASETS[name]["audio_dir"]))  # 폴더에 있는 파일 이름 (일부만 내려받았으므로)
+    items = [it for it in read_protocol(name) if it["codec"] == "-" and os.path.basename(it["path"]) in have]
+    print(f"[{name}] 코덱 없는 파일 {len(items)}개 (real {sum(it['label'] == 'bonafide' for it in items)})")
+
+    return items
 
 
 def file_rng(file_id, variant):  # 파일·증강 종류마다 고정된 난수 (언제 돌려도 같은 증강)
@@ -128,3 +137,5 @@ if __name__ == "__main__":
     eval_items = select_eval_items()  # eval 8,000개 (real + fake)
     build_split(eval_items, EVAL_DATA, "clean", extractor, model)
     build_split(eval_items, EVAL_DATA, "room", extractor, model)  # 같은 파일에 방 환경을 입힌 것
+    for name in RDM_EXTRA_EVAL:  # 최신 공격 확인용 (ASVspoof 5)
+        build_split(select_extra_eval(name), name, "clean", extractor, model)

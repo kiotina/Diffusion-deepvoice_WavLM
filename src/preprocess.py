@@ -52,6 +52,7 @@ def read_protocol(data_name):  # data_name: config.py의 DATASETS 이름 (예: "
                 "file_id": parts[columns["file_id"]],  # 파일 ID
                 "attack_id": parts[columns["attack_id"]],  # 공격 종류 (2019 real은 "-")
                 "label": parts[columns["label"]],  # "bonafide"(real) 또는 "spoof"(fake)
+                "codec": parts[columns["codec"]] if "codec" in columns else "-",  # 거친 코덱 (ASVspoof 5만 있다. "-" = 없음)
             })
 
     if len(items) == 0:  # 한 줄도 못 읽었으면 칸 번호나 라벨 파일이 잘못된 것이다. (조용히 0개로 넘어가지 않도록)
@@ -67,11 +68,11 @@ def read_folder(data_name):  # 라벨 파일 없이 폴더 안의 wav를 모두 
 
     for folder, sub_folders, files in os.walk(dataset["audio_dir"]):  # 음성 폴더 아래의 모든 폴더를 하나씩 본다.
         sub_folders.sort()  # 폴더를 이름순으로 돌아서, 언제 실행해도 파일 순서가 같게 한다.
-        speaker_id = os.path.basename(folder)  # 화자마다 폴더 하나라서 폴더 이름을 화자 ID로 쓴다.
+        speaker_id = os.path.basename(folder)  # 폴더 이름을 화자 ID로 쓴다. (한국어: 화자 폴더, LibriSpeech: 화자 안의 챕터 폴더)
         if not any(key in speaker_id for key in dataset["speakers"]):  # 이 데이터의 화자가 아니면 건너뛴다. (train 화자가 dev에 섞이지 않게)
             continue
         for name in sorted(files):  # 파일 이름순으로
-            if name.lower().endswith(".wav"):
+            if name.lower().endswith((".wav", ".flac")):  # 한국어는 wav, LibriSpeech는 flac
                 items.append({"path": os.path.join(folder, name), "speaker_id": speaker_id,
                               "file_id": os.path.splitext(name)[0], "attack_id": "-", "label": "bonafide"})  # 모두 진짜 사람 음성
 
