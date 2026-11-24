@@ -150,7 +150,23 @@ def phase_channel(stft):  # 위상 변화 편차: 주파수마다 "다음 프레
     return deviation
 
 
-CHANNEL_FUNCTIONS = {"spec": spec_channel, "phase": phase_channel}  # 특징 이름 → 만드는 함수
+def residual_channel(stft):  # 잔차 스펙트로그램: log 스펙트로그램 − 매끈한 포락선(입 모양)
+
+    log_power = spec_channel(stft)  # (257, 프레임 수)
+    cepstrum = np.fft.irfft(log_power, axis=0)  # 켑스트럼: log 스펙트럼을 한 번 더 푸리에 변환 → "스펙트럼이 얼마나 빨리 출렁이는지"별로 나눈다. (512, 프레임 수)
+    cepstrum[CEPSTRUM_LIFTER:-CEPSTRUM_LIFTER + 1] = 0.0  # 빠른 출렁임(배음 = 목소리 높이)을 지우고 느린 출렁임(포먼트)만 남긴다. (양쪽이 대칭이라 앞뒤 모두 남긴다)
+    envelope = np.fft.rfft(cepstrum, axis=0).real  # 다시 log 스펙트럼으로 → 매끈한 포락선 (257, 프레임 수)
+
+    return log_power - envelope  # 포락선을 빼면 음원의 미세 구조(배음, 잡음 성분)만 남는다.
+
+
+def delta_channel(stft):  # 시간 변화량: 이웃 프레임과의 log 스펙트로그램 차이
+
+    log_power = spec_channel(stft)  # (257, 프레임 수)
+    return np.diff(log_power, axis=1, prepend=log_power[:, :1])  # 지금 프레임 − 앞 프레임. 첫 프레임은 0
+
+
+CHANNEL_FUNCTIONS = {"spec": spec_channel, "phase": phase_channel, "residual": residual_channel, "delta": delta_channel}  # 특징 이름 → 만드는 함수
 
 
 def wave_to_feature(wave):  # waveform → 특징 (채널 수, N_BINS, 프레임 수)
@@ -161,9 +177,7 @@ def wave_to_feature(wave):  # waveform → 특징 (채널 수, N_BINS, 프레임
         win_length=WIN_LENGTH,
         hop_length=HOP_LENGTH,
     )
-    stft = stft[:N_BINS]  # 맨 위 한 칸(8000Hz)을 버려 256칸으로 맞춘다.
-
-    channels = [CHANNEL_FUNCTIONS[name](stft) for name in FEATURES]  # 특징마다 (256, 프레임 수)
+    channels = [CHANNEL_FUNCTIONS[name](stft)[:N_BINS] for name in FEATURES]  # 특징마다 257칸으로 계산한 뒤 맨 위 한 칸(8000Hz)을 버려 (256, 프레임 수)
     return np.stack(channels).astype(np.float32)  # (채널 수, 256, 프레임 수)
 
 

@@ -62,7 +62,7 @@ OUTPUT_DIR = os.path.join(PROJECT_ROOT, "outputs")  # 어디서 실행하든 항
 # 정답은 파일 이름으로만 적어 둔다(예: real_..., voice_preview_...는 상용 TTS). 모델·임계값은 이 폴더를 전혀 보지 않는다.
 TEST_SAMPLES_DIR = os.path.join(PROJECT_ROOT, "test_samples")
 
-RUN_NAME = "spec"  # 실험 이름. 특징 목록을 바꾸면 이름도 바꾼다. (예: "phase", "spec_phase") 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다.
+RUN_NAME = "all4"  # 실험 이름. 특징 목록을 바꾸면 이름도 바꾼다. (예: "phase", "spec_phase") 결과가 outputs/<RUN_NAME>/에 따로 저장된다. 설정을 바꿔 새로 실험할 때는 이름도 바꾼다.
 RUN_DIR = os.path.join(OUTPUT_DIR, RUN_NAME)  # 이번 실험의 결과 폴더
 
 PREPROCESS_DIR = os.path.join(RUN_DIR, "preprocess")  # 전처리 결과
@@ -104,9 +104,16 @@ LOG_EPS = 1e-6  # log(0)을 막기 위해 더하는 아주 작은 값
 #             (특정 대역만 골라 보지 않는다. 어느 대역에 흔적이 있을지는 fake를 보고 정하는 것이라 real-only에 어긋난다)
 #   "phase" : 위상 변화 편차. 주파수마다 "다음 프레임에서 위상이 예상만큼 돌았는가". 세기만 보는 스펙트로그램이 버리는 정보다.
 #             (신경망 보코더는 세기는 잘 흉내 내도 위상을 자연스럽게 잇기 어렵다고 알려져 있다)
-# 1단계: ["spec"] → 그다음 ["phase"], ["spec", "phase"]를 같은 조건으로 비교한다.
-FEATURES = ["spec"]
+#   "residual" : 잔차 스펙트로그램. log 스펙트로그램에서 매끈한 포락선(입 모양 = 성도가 만드는 포먼트)을 뺀 것.
+#             성대에서 나온 소리(음원)의 미세 구조만 남는다. 화자마다 다른 입 모양의 영향을 줄이려는 목적
+#             (포락선은 LPC 대신 켑스트럼으로 구한다: 같은 256칸 격자에서 바로 계산되고, 하는 일은 같다)
+#   "delta" : 시간 변화량. 이웃 프레임과의 log 스펙트로그램 차이. 소리가 얼마나 매끈하게(또는 들쭉날쭉) 변하는지
+# 1단계: ["spec"], ["phase"]를 따로 학습 (2026-11-24 완료)
+# 2단계(시간 절약): 4개를 쌓아 한 번에 학습하고, 평가에서 채널별 오차를 따로 저장해 채널 조합마다 점수를 따로 본다.
+FEATURES = ["spec", "phase", "residual", "delta"]
 N_CHANNELS = len(FEATURES)  # U-Net 입력 채널 수
+CEPSTRUM_LIFTER = 30  # 잔차용: 켑스트럼 앞쪽 30칸(= 1.9ms보다 느린 변화)만 남겨 포락선을 만든다.
+# 포먼트(입 모양)는 이보다 느리게, 목소리 높이(배음 간격, 주기 2.5~15ms)는 이보다 빠르게 변해서 둘이 갈린다.
 N_BINS = N_FFT // 2  # 세로 칸 수. 257칸 중 맨 위 한 칸(8000Hz)을 버리고 256칸을 쓴다. (U-Net이 두 번 반으로 줄이므로 4로 나눠떨어져야 한다)
 
 
@@ -164,6 +171,10 @@ LOSS_EPS = 1e-8  # masked MSE에서 mask=1 칸이 0개일 때 0으로 나누지 
 # 점수에 쓸 t. 원래 계획은 100/300/500이었지만, 지난 실험(Mel, XLS-R) 모두 t=500 이상은 real/fake를 거의 못 갈랐고
 # 50~200이 가장 좋았다. 그래서 이번 입력의 결과를 보기 전에 50/100/200으로 정해 둔다. (입력이 바뀌면 3단계에서 다시 확인)
 SCORE_TIMESTEPS = [50, 100, 200]
+# 측정은 더 넓은 t에서 해 두고(segments.csv), 점수 방식·t 조합은 나중에 분석 스크립트에서 다시 계산한다. (평가를 여러 번 돌리지 않으려고)
+# 기본 점수(score_mean, score_max)는 위 SCORE_TIMESTEPS만 쓴다.
+MEASURE_TIMESTEPS = [10, 25, 50, 100, 200, 400]
+NUM_BANDS = 8  # 256칸을 32칸(1kHz)씩 8개 대역으로 나눠 오차를 따로 잰다.
 SCORE_NOISE_SEEDS = [1729, 2718]  # t마다 사용할 고정 노이즈의 시작값 (모든 파일이 같은 노이즈로 시험을 본다)
 INFER_HOP_SEC = 1.0  # 평가할 때 2초 창을 1초씩 밀면서 자른다.
 INFER_HOP_FRAMES = int(INFER_HOP_SEC * SAMPLE_RATE) // HOP_LENGTH  # 1초 = 62프레임
@@ -172,7 +183,41 @@ THRESHOLD_PERCENTILE = 95  # dev bona fide 파일 점수의 95백분위를 임�
 
 
 # ===============================
-# 10. 개발용 (작게 돌려 볼 때)
+# 10. RDM: XLS-R 파일 벡터 위의 디퓨전 (rdm_features.py, rdm_train.py, rdm_evaluate.py)
+# ===============================
+
+# 음성 파일 하나 → XLS-R 22층 프레임 특징 → 프레임 평균 = 벡터 하나(1024). 그 벡터들 위에서 작은 MLP 디퓨전을 real만으로 학습한다.
+# XLS-R은 숫자로 바꾸는 일만 하고(학습하지 않음), 판정은 디퓨전의 노이즈 예측 오차로 한다.
+# 프레임마다 디퓨전을 돌리면 오차가 "그 순간 소리가 얼마나 복잡한가"에 흔들렸다(EER 20%). 파일 평균으로 그 흔들림을 없앤다. (EER 11%)
+RDM_RUN_NAME = "rdm_xlsr_l22"  # 결과 폴더 이름 (outputs/rdm_xlsr_l22/)
+RDM_DIR = os.path.join(OUTPUT_DIR, RDM_RUN_NAME)
+XLSR_MODEL = "facebook/wav2vec2-xls-r-300m"  # 사전학습 음성 모델 (128개 언어, 약 3억 가중치). 처음 실행 때 내려받는다.
+XLSR_LAYER = 22  # 24층 중 몇 번째 층을 쓸지. 19~24층 중 22층 (층 후보는 eval을 본 비교에서 나왔다 → 발표 때 밝힌다)
+XLSR_DIM = 1024  # XLS-R 한 층의 특징 차원 = 디퓨전 입력 크기
+
+RDM_HIDDEN = 1024  # MLP 안쪽 크기
+RDM_BLOCKS = 3  # MLP 잔차 블록 수
+RDM_DROPOUT = 0.1  # real 표본이 2,580개뿐이라 외우지 않도록 일부 값을 무작위로 끈다.
+RDM_BATCH_SIZE = 256  # 벡터는 작아서 한 번에 많이 넣는다.
+RDM_EPOCHS = 4000  # epoch당 약 10걸음 → 4만 걸음 (한 번 학습에 몇 분)
+RDM_VAL_EVERY = 50  # 이 epoch마다 dev real 손실을 재고, 가장 낮았던 모델을 남긴다.
+RDM_NOISE_COUNT = 16  # 점수를 낼 때 t마다 고정 노이즈 16개로 시험을 보고 평균한다. (벡터 하나라 싸다)
+# 점수용 t는 SCORE_TIMESTEPS(50/100/200), 임계값은 THRESHOLD_PERCENTILE(95)을 그대로 쓴다.
+
+
+# ===============================
+# 11. 웹 데모 (server.py, explain.py)
+# ===============================
+
+WEB_DIR = os.path.join(PROJECT_ROOT, "web")  # index.html이 있는 폴더
+MAX_UPLOAD_MB = 20  # 업로드 크기 상한
+MAX_AUDIO_SEC = 30.0  # 이보다 긴 음성은 앞부분만 분석한다. (GPU 메모리, 응답 시간)
+SERVER_HOST = "127.0.0.1"  # 내 컴퓨터에서만 접속 가능. "0.0.0.0"으로 열면 음성이 네트워크로 오가므로 HTTPS가 필요하다.
+SERVER_PORT = 8000  # 브라우저 주소: http://127.0.0.1:8000
+
+
+# ===============================
+# 12. 개발용 (작게 돌려 볼 때)
 # ===============================
 
 FILE_LIMIT = None  # 숫자를 넣으면 train·dev에서 앞에서부터 그 개수의 파일만 쓴다. (예: 100)
@@ -180,7 +225,7 @@ EVAL_LIMIT = 8000  # 숫자를 넣으면 eval에서 무작위로 그 개수만 �
 
 
 # ===============================
-# 11. 실행 장치와 난수
+# 13. 실행 장치와 난수
 # ===============================
 
 SEED = 42  # 실험을 반복해도 같은 결과가 나오도록 난수 시작값을 고정한다. (eval 표본 고르기에도 쓴다)

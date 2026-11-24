@@ -59,8 +59,9 @@ def forward_diffusion(x0, t, noise=None):  # x_t = √ᾱ_t · x₀ + √(1−�
         noise = torch.randn_like(x0)  # 표준정규분포 노이즈를 새로 만든다.
     # 검증·평가 때는 고정 노이즈를 밖에서 넣어 매번 같은 문제를 풀게 한다.
 
-    sqrt_ab = sqrt_alpha_bars[t].view(-1, 1, 1, 1)  # (B,) → (B, 1, 1, 1): 조각마다 다른 t의 값을 그림 전체에 곱하도록
-    sqrt_1m_ab = sqrt_one_minus_alpha_bars[t].view(-1, 1, 1, 1)  # (B, 1, 1, 1)
+    shape = (-1,) + (1,) * (x0.dim() - 1)  # 그림 (B, C, H, W)이면 (-1, 1, 1, 1), 벡터 (B, D)이면 (-1, 1) (RDM도 이 함수를 쓴다)
+    sqrt_ab = sqrt_alpha_bars[t].view(shape)  # (B,) → (B, 1, 1, 1): 조각마다 다른 t의 값을 그림 전체에 곱하도록
+    sqrt_1m_ab = sqrt_one_minus_alpha_bars[t].view(shape)  # (B, 1, 1, 1)
 
     x_t = sqrt_ab * x0 + sqrt_1m_ab * noise  # 노이즈가 섞인 특징
 

@@ -36,7 +36,10 @@ from config import *  # config.py의 모든 설정값을 가져온다.
 from preprocess import cut_segments, file_to_feature, load_stats, pad_to_segment, read_protocol  # 전처리와 똑같이 자른다.
 from train import UNet, forward_diffusion  # 모델과 노이즈 섞기 (학습과 똑같이)
 
-ERROR_COLUMNS = [f"e_t{t}_{name}" for t in SCORE_TIMESTEPS for name in FEATURES]  # 예: e_t50_spec, e_t50_phase, e_t100_spec, …
+# segments.csv에는 넓게 잰 오차를 모두 남긴다: (측정 t) × 채널 × 대역. 예: e_t10_spec_b0, …, e_t400_delta_b7
+ERROR_COLUMNS = [f"e_t{t}_{name}_b{b}" for t in MEASURE_TIMESTEPS for name in FEATURES for b in range(NUM_BANDS)]
+# 기본 점수(score_mean, score_max)는 SCORE_TIMESTEPS의 (t, 채널)별 오차만 쓴다. (대역 8개를 평균한 값 = 채널 전체 오차)
+SCORE_COLUMNS = [f"e_t{t}_{name}" for t in SCORE_TIMESTEPS for name in FEATURES]
 SEGMENT_COLUMNS = ["split", "file_id", "label", "attack_id", "start_sec"] + ERROR_COLUMNS  # segments.csv의 열
 SCORE_KEYS = ["score_mean", "score_max"]  # 파일 점수 두 가지
 
@@ -75,19 +78,25 @@ def make_fixed_noises():  # seed마다 노이즈 하나를 만들어, 모든 파
 # 2. 파일 하나의 구간별 오차 측정
 # ===============================
 
-def channel_mse(pred, target, mask):  # 구간마다, 채널마다 masked MSE (train.py의 masked_mse를 채널별로 나눈 것)
+def band_mse(pred, target, mask):  # 구간마다, 채널마다, 주파수 대역마다 masked MSE (train.py의 masked_mse를 나눠서 잰 것)
+
+    batch = pred.shape[0]  # 구간 수 B
+    bins_per_band = N_BINS // NUM_BANDS  # 대역 하나의 칸 수 (256 / 8 = 32칸 = 1kHz)
 
     mask = mask.expand_as(pred)  # (B, 1, 1, 126) → (B, 채널 수, 256, 126)
     squared_error = (pred - target) ** 2 * mask  # mask=0인 칸(패딩)의 오차는 0으로 지운다.
 
-    error_sum = squared_error.sum(dim=(2, 3))  # (B, 채널 수): 채널마다 오차의 합
-    count = mask.sum(dim=(2, 3))  # (B, 채널 수): 채널마다 mask=1인 칸 수
+    squared_error = squared_error.reshape(batch, N_CHANNELS, NUM_BANDS, bins_per_band, SEGMENT_FRAMES)  # 256칸을 32칸씩 8묶음으로
+    mask = mask.reshape(batch, N_CHANNELS, NUM_BANDS, bins_per_band, SEGMENT_FRAMES)
 
-    return error_sum / count.clamp(min=LOSS_EPS)  # (B, 채널 수). 채널이 하나면 masked_mse와 같은 값이다.
+    error_sum = squared_error.sum(dim=(3, 4))  # (B, 채널 수, 대역 수): 대역마다 오차의 합
+    count = mask.sum(dim=(3, 4))  # (B, 채널 수, 대역 수): 대역마다 mask=1인 칸 수
+
+    return error_sum / count.clamp(min=LOSS_EPS)  # (B, 채널 수, 대역 수). 대역을 평균하면 채널 전체 오차와 같다.
 
 
 @torch.no_grad()  # 평가에서는 gradient를 계산하지 않는다.
-def measure_file(model, path, stats, fixed_noises):  # 음성 파일 → 구간마다 (t, 채널)별 오차 (구간 수, t 수 × 채널 수)
+def measure_file(model, path, stats, fixed_noises):  # 음성 파일 → 구간마다 (t, 채널, 대역)별 오차 (구간 수, ERROR_COLUMNS 수)
 
     feature = file_to_feature(path, stats)  # 정규화된 특징 (채널 수, 256, 프레임 수)
     segments = cut_segments(feature, hop_frames=INFER_HOP_FRAMES)  # 2초 창을 1초씩 밀며 자른다.
@@ -101,9 +110,9 @@ def measure_file(model, path, stats, fixed_noises):  # 음성 파일 → 구간�
     starts = [s[2] for s in segments]  # 구간 시작 프레임
     num_segments = x0.shape[0]  # S
 
-    # t 3개 × 노이즈 2개 = 6가지 경우를 한 배치로 묶어 U-Net을 한 번만 돌린다. (빠르게)
+    # t 6개 × 노이즈 2개 = 12가지 경우를 한 배치로 묶어 U-Net을 한 번만 돌린다. (빠르게)
     x_list, t_list, noise_list = [], [], []
-    for t_value in SCORE_TIMESTEPS:  # t마다 (바깥 반복)
+    for t_value in MEASURE_TIMESTEPS:  # t마다 (바깥 반복)
         for noise in fixed_noises:  # 노이즈마다 (안쪽 반복)
             t = torch.full((num_segments,), t_value, device=DEVICE)  # 모든 구간에 같은 t
             noise = noise.expand(num_segments, -1, -1, -1)  # 같은 노이즈를 구간 수만큼 늘린다.
@@ -112,13 +121,20 @@ def measure_file(model, path, stats, fixed_noises):  # 음성 파일 → 구간�
             t_list.append(t)
             noise_list.append(noise)
 
-    pred_noise = model(torch.cat(x_list), torch.cat(t_list))  # (6S, 채널 수, 256, 126)
-    errors = channel_mse(pred_noise, torch.cat(noise_list), masks.repeat(len(x_list), 1, 1, 1))  # (6S, 채널 수)
-    errors = errors.view(len(SCORE_TIMESTEPS), len(fixed_noises), num_segments, N_CHANNELS)  # (t 3, 노이즈 2, S, 채널 수): 위 반복 순서와 같다.
-    errors = errors.mean(dim=1)  # 노이즈 2개의 평균 → (t 3, S, 채널 수)
-    errors = errors.permute(1, 0, 2).reshape(num_segments, -1)  # (S, t 3 × 채널 수): ERROR_COLUMNS 순서(t 바깥, 채널 안쪽)와 같다.
+    pred_noise = model(torch.cat(x_list), torch.cat(t_list))  # (12S, 채널 수, 256, 126)
+    errors = band_mse(pred_noise, torch.cat(noise_list), masks.repeat(len(x_list), 1, 1, 1))  # (12S, 채널 수, 대역 수)
+    errors = errors.view(len(MEASURE_TIMESTEPS), len(fixed_noises), num_segments, N_CHANNELS, NUM_BANDS)  # 위 반복 순서와 같다.
+    errors = errors.mean(dim=1)  # 노이즈 2개의 평균 → (t 6, S, 채널 수, 대역 수)
+    errors = errors.permute(1, 0, 2, 3).reshape(num_segments, -1)  # (S, t × 채널 × 대역): ERROR_COLUMNS 순서(t 바깥 → 채널 → 대역 안쪽)와 같다.
 
     return starts, errors.cpu().numpy()
+
+
+def score_errors(errors):  # (구간 수, ERROR_COLUMNS 수) → (구간 수, SCORE_COLUMNS 수): 기본 점수용 t만 골라 대역을 평균한다.
+
+    errors = errors.reshape(len(errors), len(MEASURE_TIMESTEPS), N_CHANNELS, NUM_BANDS)  # (S, t 6, 채널, 대역)
+    picked = [MEASURE_TIMESTEPS.index(t) for t in SCORE_TIMESTEPS]  # 기본 점수에 쓸 t의 위치
+    return errors[:, picked].mean(axis=3).reshape(len(errors), -1)  # (S, t 3 × 채널): SCORE_COLUMNS 순서와 같다.
 
 
 # ===============================
@@ -167,8 +183,8 @@ def measure_split(model, items, split, stats, fixed_noises, csv_path):  # 파일
         for i, item in enumerate(todo):  # 파일마다
             starts, errors = measure_file(model, item["path"], stats, fixed_noises)  # (S, t 수 × 채널 수)
 
-            if i == 0:  # 첫 파일에서 크기와 값을 확인한다.
-                print(f"  첫 파일 {item['file_id']}: 구간 {errors.shape[0]}개, 오차 {dict(zip(ERROR_COLUMNS, np.round(errors[0], 4)))}")
+            if i == 0:  # 첫 파일에서 크기와 값을 확인한다. (기본 점수용 (t, 채널) 오차만 보여 준다)
+                print(f"  첫 파일 {item['file_id']}: 구간 {errors.shape[0]}개, 오차 열 {errors.shape[1]}개, {dict(zip(SCORE_COLUMNS, np.round(score_errors(errors)[0], 4)))}")
 
             for start, error in zip(starts, errors):  # 구간마다 한 줄
                 start_sec = start * HOP_LENGTH / SAMPLE_RATE  # 시작 프레임 → 초 (무음을 잘라 낸 뒤 기준)
@@ -188,15 +204,15 @@ def load_segments(csv_path, split, file_ids):  # segments.csv에서 이번에 �
     with open(csv_path, "r", encoding="utf-8") as f:
         rows = [row for row in csv.DictReader(f) if row["split"] == split and row["file_id"] in file_ids]
 
-    errors = np.array([[float(row[c]) for c in ERROR_COLUMNS] for row in rows])  # (구간 수, t 수 × 채널 수)
+    errors = np.array([[float(row[c]) for c in ERROR_COLUMNS] for row in rows])  # (구간 수, ERROR_COLUMNS 수)
 
-    return rows, errors
+    return rows, score_errors(errors)  # 기본 점수용 (구간 수, SCORE_COLUMNS 수). 나머지 열은 분석 스크립트가 직접 읽는다.
 
 
 def calibrate(dev_errors):  # dev real 구간의 (t, 채널)별 평균·표준편차
 
     calibration = {}
-    for j, column in enumerate(ERROR_COLUMNS):  # 열마다
+    for j, column in enumerate(SCORE_COLUMNS):  # 열마다
         calibration[column] = {
             "mean": float(dev_errors[:, j].mean()),  # μ
             "std": float(dev_errors[:, j].std()),  # σ
@@ -209,8 +225,8 @@ def calibrate(dev_errors):  # dev real 구간의 (t, 채널)별 평균·표준�
 def segment_scores(errors, calibration):  # 구간 점수 = (t, 채널)별 z-점수의 평균
 
     z = np.zeros_like(errors)  # (구간 수, 열 수)
-    for j, column in enumerate(ERROR_COLUMNS):
-        z[:, j] = (errors[:, j] - calibration[column]["mean"]) / calibration[column]["std"]  # z = (e − μ) / σ
+    for j, column in enumerate(SCORE_COLUMNS):
+        z[:, j] =(errors[:, j] - calibration[column]["mean"]) / calibration[column]["std"]  # z = (e − μ) / σ
 
     return z.mean(axis=1)  # (구간 수,): 클수록 "real보다 노이즈를 못 맞혔다"
 
@@ -290,7 +306,7 @@ def score_test_samples(model, stats, fixed_noises, calibration, thresholds, out_
         except ValueError as error:  # 소리가 없는 파일 등 (preprocess.load_audio가 낸 오류)
             print(f"  {name}: 건너뜀 ({error})")
             continue
-        seg = segment_scores(errors, calibration)  # 구간 점수
+        seg = segment_scores(score_errors(errors), calibration)  # 구간 점수
         row = {"file": name, "num_segments": len(seg), "score_mean": float(seg.mean()), "score_max": float(seg.max())}
         for key in SCORE_KEYS:
             row[key.replace("score_", "pred_")] = "spoof" if row[key] > thresholds[key] else "bonafide"
