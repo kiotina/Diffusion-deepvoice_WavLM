@@ -49,7 +49,15 @@ LOSSY_EXTS = {"mp3", "m4a", "aac", "mp4", "ogg", "oga", "opus", "webm", "amr", "
 
 FRAME_SEC = FRAME_HOP / SAMPLE_RATE  # 모델 프레임 간격(초): WavLM 0.02
 FRAME_OFFSET_SEC = (WIN_LENGTH / 2 / SAMPLE_RATE) if FEATURE_TYPE == "wavlm" else 0.0  # WavLM 프레임 i는 [320i, 320i+400) 샘플을 본다 → 중심이 12.5ms 뒤
-TRAIN_DESC = "ASVspoof 2019 LA 진짜 음성, 스튜디오 녹음" + (", 전화 코덱 증강 포함" if AUGMENT_CODEC else "") + (", 방 환경 증강 포함" if AUGMENT_ROOM else "")  # 경고 문장에 쓰는 학습 데이터 설명
+DATA_DESC = {  # 화면에 보여 줄 데이터 이름
+    "2019_train": "ASVspoof 2019 영어(스튜디오)",
+    "ko_train": "AIHub 다화자 음성합성 한국어(4명)",
+    "kspon_train": "AIHub 한국어 음성(KsponSpeech, 대화 세션 124개)",
+}
+if FEATURE_MAHA:  # 판정에 쓰는 진짜 음성 무리 설명 (특징 거리)
+    TRAIN_DESC = " + ".join(DATA_DESC.get(d, d) for d in FEATURE_MAHA_TRAIN) + (", 방 환경" if FEATURE_MAHA_ROOM else "") + (", 목소리 높이 증강" if FEATURE_MAHA_SPEEDS else "")
+else:
+    TRAIN_DESC = "ASVspoof 2019 LA 진짜 음성, 스튜디오 녹음" + (", 전화 코덱 증강 포함" if AUGMENT_CODEC else "") + (", 방 환경 증강 포함" if AUGMENT_ROOM else "")  # 경고 문장에 쓰는 학습 데이터 설명
 
 
 # ===============================
@@ -415,7 +423,7 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
             meta = str(self.feature_ref["meta"])
             if not meta.startswith(f"{WAVLM_MODEL_NAME}|{WAVLM_LAYER}|"):  # 다른 모델·층으로 만든 기준값이면 점수가 조용히 틀어진다.
                 raise RuntimeError(f"특징 거리 기준값의 모델·층이 지금 설정과 다릅니다: {meta}\npython src/feature_maha.py 를 다시 실행하세요.")
-            self.thresholds["score_feature"] = float(self.feature_ref["threshold"])
+            self.thresholds["score_feature"] = float(np.percentile(self.feature_ref["dev_scores"], FEATURE_THRESHOLD_PERCENTILE))  # dev real 점수에서 바로 계산 (백분위를 바꿔도 기준값을 다시 만들 필요 없음)
             self.dev_scores["score_feature"] = self.feature_ref["dev_scores"]
 
         self.hists = {}
@@ -457,6 +465,9 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
             "network": "1D U-Net 디퓨전(DDPM)" if FEATURE_TYPE == "wavlm" else "2D U-Net 디퓨전(DDPM)",
             "decision_method": "특징 거리(마할라노비스, 디퓨전 없음)" if DECISION_KEY == "score_feature" else "디퓨전 노이즈 예측 오차",  # 무엇으로 판정했는지
             "room_augment": AUGMENT_ROOM,
+            "feature_train_desc": TRAIN_DESC if FEATURE_MAHA else None,  # 특징 거리의 진짜 음성 무리 (화면 "방법"에 표시)
+            "feature_threshold_percentile": FEATURE_THRESHOLD_PERCENTILE if FEATURE_MAHA else None,
+            "feature_num_real": int(str(self.feature_ref["meta"]).split("|train=")[1].split(":")[1].split("|")[0]) if FEATURE_MAHA else None,  # 무리에 들어간 진짜 음성 수
             "checkpoint_epoch": self.checkpoint["epoch"],
             "train_data": TRAIN_DATA,
             "dev_data": DEV_DATA,

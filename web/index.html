@@ -416,7 +416,7 @@ async function checkServer() {
     state.info = info;
     state.maxSec = info.max_audio_sec;
     state.maxMb = info.max_upload_mb;
-    chip.textContent = `${info.model.feature_type === "wavlm" ? "WavLM" : info.model.feature_type} · ${info.model.run_name} · epoch ${info.model.checkpoint_epoch}`;
+    chip.textContent = info.model.feature_train_desc ? `XLS-R 특징 거리 · 영어+한국어` : `${info.model.feature_type === "wavlm" ? "WavLM" : info.model.feature_type} · ${info.model.run_name} · epoch ${info.model.checkpoint_epoch}`;
     chip.className = "chip ok";
     $("drop-hint").textContent = `wav · flac · mp3 · m4a · ogg · webm · 최대 ${info.max_upload_mb}MB · 앞 ${info.max_audio_sec}초 분석`;
   } catch {
@@ -1094,7 +1094,8 @@ async function buildReport() {
   <section>
     <h2><span>7</span>방법</h2>
     <div class="box">
-      <p><b>모델</b> · ${esc(m.feature)}을 입력으로 쓰는 ${esc(m.network)}. 학습에는 진짜 음성(${esc(m.train_data)} bona fide)만 썼으며 가짜 음성은 보지 않았습니다${m.codec_augment ? " (전화 코덱 증강 포함)" : ""}.</p>
+      ${m.feature_train_desc ? `<p><b>판정</b> · ${esc(m.feature)}의 파일 평균이 진짜 음성 무리에서 얼마나 떨어졌는지(마할라노비스 거리)로 판정합니다. 진짜 음성 무리: ${esc(m.feature_train_desc)} (${m.feature_num_real.toLocaleString()}개). 임계값은 개발용 진짜 음성 점수의 ${m.feature_threshold_percentile}백분위입니다. 가짜 음성은 쓰지 않았습니다. 아래 디퓨전 점수와 시간축 그림은 어느 구간이 이상한지 보여 주는 설명용입니다.</p>` : ""}
+      <p><b>${m.feature_train_desc ? "설명용 모델" : "모델"}</b> · ${esc(m.feature)}을 입력으로 쓰는 ${esc(m.network)}. 학습에는 진짜 음성(${esc(m.train_data)} bona fide)만 썼으며 가짜 음성은 보지 않았습니다${m.codec_augment ? " (전화 코덱 증강 포함)" : ""}.</p>
       <p><b>점수</b> · 음성을 2초 창·1초 간격으로 자르고, 고정 노이즈를 t=${m.score_timesteps.join(", ")} 단계로 섞은 뒤 모델이 그 노이즈를 얼마나 잘 맞히는지(예측 오차)를 잽니다. 진짜 음성으로 배운 모델은 진짜 음성의 노이즈를 잘 맞히므로, 오차가 진짜 음성과 다르면 낯선 음성으로 봅니다.</p>
       <p><b>임계값</b> · 개발용 진짜 음성(${esc(m.dev_data)}) ${m.num_dev_files}개 점수의 ${m.threshold_percentile}백분위. 진짜 음성의 약 ${100 - m.threshold_percentile}%는 임계값을 넘도록 정한 값입니다.</p>
       <p><b>설명 방식</b> · 점수를 만든 노이즈 예측 오차를 시간(프레임), 노이즈 단계(t), 분포 거리 특징별로 나눠 보여 줍니다. 별도의 설명 모델을 붙인 것이 아니라 판정에 쓴 값 자체를 분해한 것입니다.</p>

@@ -18,6 +18,13 @@ DATASET_ROOT = r"H:\Workspace\Dataset"  # 모든 데이터셋이 들어 있는 �
 LA2019_ROOT = os.path.join(DATASET_ROOT, "LA")  # ASVspoof 2019 LA (train, dev, eval)
 LA2021_ROOT = os.path.join(DATASET_ROOT, "ASVspoof2021_LA_eval")  # ASVspoof 2021 LA (eval만 있다)
 KO_ROOT = os.path.join(DATASET_ROOT, "원천데이터")  # AIHub 한국어 음성 (모두 진짜 사람 음성. 화자마다 폴더 하나)
+
+# AIHub "한국어 음성"(KsponSpeech): 약 2,000명의 자유 대화. 화자를 늘리려고 일부만 wav로 꺼내 쓴다. (prepare_kspon.py)
+KSPON_ZIP_DIR = os.path.join(DATASET_ROOT, "AI-Hub_한국어 음성", "zip")  # 내려받은 조각을 이어 붙인 zip
+KSPON_WAV_DIR = os.path.join(DATASET_ROOT, "AI-Hub_한국어 음성", "wav")  # 골라 꺼낸 wav (train/, dev/)
+KSPON_EVERY = 25  # train: 세션 폴더마다 25번째 문장만 (약 1,000문장 폴더에서 40개씩 → 여러 세션·화자가 고르게)
+KSPON_DEV_EVERY = 3  # dev(eval_clean, eval_other): 3번째마다
+KSPON_MIN_SEC = 1.5  # 이보다 짧은 문장은 버린다.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # src 폴더의 한 칸 위 = 프로젝트 폴더
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "outputs")  # 어디서 실행하든 항상 프로젝트 폴더의 outputs에 저장한다.
 
@@ -59,6 +66,14 @@ DATASETS = {  # 데이터 이름 → 라벨 파일, 음성 폴더, 칸 번호. �
             "1527404971",  # 자유대화, 실내, 남성 (65분)
             "1524374974",  # 자유대화, 실내, 여성 (52분)
         ],
+    },
+    "kspon_train": {  # KsponSpeech_01에서 고른 문장 (세션 폴더 = speaker_id 자리)
+        "audio_dir": os.path.join(KSPON_WAV_DIR, "train"),
+        "speakers": ["KsponSpeech_"],  # 모든 세션 폴더
+    },
+    "kspon_dev": {  # KsponSpeech_eval에서 고른 문장 (임계값용)
+        "audio_dir": os.path.join(KSPON_WAV_DIR, "dev"),
+        "speakers": ["eval_"],  # eval_clean, eval_other
     },
     "ko_dev": {
         "audio_dir": KO_ROOT,
@@ -231,6 +246,20 @@ EVAL_DIR += "_room" if EVAL_ROOM else ""  # 결과를 따로 저장한다. (예:
 
 
 # ===============================
+# 4-4. 디퓨전 학습 데이터 넓히기 (특징 거리와 같은 진짜 음성을 디퓨전도 보게)
+# ===============================
+
+# 특징 거리(feature_maha.py)는 영어·한국어·KsponSpeech·방 환경·배속을 다 본 진짜 음성 무리로 판정한다.
+# 디퓨전은 영어 2,580개(+방 환경)만 보고 학습해서 비교가 공정하지 않았다. → 같은 진짜 음성으로 학습할 수 있게 한다.
+EXTRA_TRAIN_DATA = []  # TRAIN_DATA에 더해 학습할 real 데이터 (예: ["ko_train", "kspon_train"]). dev(검증·보정·임계값)는 DEV_DATA 그대로
+AUGMENT_SPEEDS = []  # 배속 증강 (예: [0.9, 1.1, 1.2]). 목록이 있으면 파일마다 증강본을 "하나만" 무작위로 고른다: 방 환경 또는 배속 중 하나
+# 파일마다 증강본을 하나만 두는 이유: 메모리. XLS-R 특징은 1024차원이라 파일 2만 개면 float32로 10GB가 넘는다. (RAM 16GB)
+TRAIN_FLOAT16 = False  # True면 학습 특징을 반정밀도(float16)로 저장해 메모리를 반으로 줄인다. 학습할 때 float32로 바꿔 쓴다.
+TRAIN_MAX_SEC = None  # 숫자를 넣으면 학습 파일마다 이 길이(초)만 무작위 위치에서 잘라 저장한다. (KsponSpeech는 평균 6초라 메모리가 커서)
+# 학습은 어차피 2초씩 무작위로 잘라 쓰므로, 3초만 남겨도 파일마다 여러 위치를 볼 수 있다.
+
+
+# ===============================
 # 5. Diffusion 설정
 # ===============================
 
@@ -323,8 +352,15 @@ FEATURE_MAHA_ROOM = True  # 진짜 음성 무리에 방 환경을 입힌 train r
 FEATURE_REFERENCE_PATH = os.path.join(EXPLAIN_DIR, "feature_reference.npz")  # feature_maha.py가 만든 기준값
 # 진짜 음성 무리에 넣을 데이터: 영어만 맞추면 한국어 real을 100% fake로 본다(dev real 500개, 점수 중앙값 9.46 = 영어 fake 수준).
 # 그래서 영어와 한국어 real을 같이 넣어 모델 하나로 두 언어를 받는다. (학습이 없어서 데이터만 더하면 된다)
-FEATURE_MAHA_TRAIN = [TRAIN_DATA, "ko_train"]  # 진짜 음성 무리 (각각 FEATURE_MAHA_ROOM이면 방 환경본도 함께)
-FEATURE_MAHA_DEV = [DEV_DATA, "ko_dev"]  # 임계값을 정할 dev real (합쳐서 95백분위)
+FEATURE_MAHA_TRAIN = [TRAIN_DATA, "ko_train", "kspon_train"]  # 진짜 음성 무리 (각각 FEATURE_MAHA_ROOM이면 방 환경본도 함께)
+FEATURE_MAHA_DEV = [DEV_DATA, "ko_dev", "kspon_dev"]  # 임계값을 정할 dev real (합쳐서 95백분위)
+# 목소리 높이: 높게 말하면 real도 fake로 본다(영어 real을 1.2배 빠르게 = 약 3음 높이면 오탐 3% → 58%).
+# 그래서 train real을 이 배속들로 바꾼 것도 진짜 음성 무리에 넣는다. 빈 목록이면 넣지 않는다.
+FEATURE_MAHA_SPEEDS = [0.9, 1.1, 1.2]  # 0.9 = 약 2음 낮게, 1.1 = 약 2음 높게, 1.2 = 약 3음 높게
+# 특징 거리의 임계값 = dev real 점수의 이 백분위. (디퓨전 점수는 THRESHOLD_PERCENTILE = 95 그대로)
+# 95%면 fake 탐지가 54%로 낮아서 90%로 낮췄다. 90%: 영어 real 오탐 4.8% / fake 탐지 69.6%, 한국어 real 오탐 19.0%, 내 목소리 real
+# (85%면 탐지 77.5%지만 한국어 real 오탐 29.2%이고 내 목소리가 fake가 된다.) eval 결과를 보고 고른 값이라 발표 때 밝힌다.
+FEATURE_THRESHOLD_PERCENTILE = 90
 
 DECISION_KEY = "score_feature"  # 웹에서 판정에 쓸 점수 (score_mean, score_max, score_maha, score_feature 중 하나). eval 결과가 가장 좋았던 것으로 바꾼다.
 MAX_UPLOAD_MB = 20  # 업로드 크기 상한

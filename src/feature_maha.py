@@ -25,9 +25,10 @@ import numpy as np  # 계산
 from sklearn.covariance import LedoitWolf  # 차원(1024)이 많을 때도 안정적인 공분산
 
 from config import *  # 경로, WAVLM_*, FEATURE_MAHA_*, THRESHOLD_PERCENTILE 등
-from preprocess import load_audio, random_room, select_bonafide, wave_to_wavlm  # 학습과 같은 방식으로 읽고 특징을 뽑는다.
+from preprocess import change_speed, load_audio, random_room, select_bonafide, wave_to_wavlm  # 학습과 같은 방식으로 읽고 특징을 뽑는다.
 
 MAD_SCALE = 1.4826  # MAD(중앙값 절대 편차)를 표준편차와 같은 크기로 바꾸는 상수 (정규분포일 때)
+FEATURE_CACHE_DIR = os.path.join(EXPLAIN_DIR, "feature_cache")  # 묶음마다 뽑은 특징 (다시 뽑지 않으려고)
 
 
 # ===============================
@@ -39,17 +40,27 @@ def pooled_feature(wave):  # waveform(무음 자름·크기 맞춤 끝난 것) �
     return wave_to_wavlm(wave).mean(axis=1)  # (WAVLM_DIM, 프레임 수) → 프레임 평균
 
 
-def collect(items, room=False):  # 파일 목록 → (파일 수, WAVLM_DIM). room이면 방 환경을 입힌 뒤 뽑는다.
+def collect(items, name, room=False, speed=1.0):  # 파일 목록 → (파일 수, WAVLM_DIM). room이면 방 환경, speed면 배속을 바꾼 뒤 뽑는다.
+
+    # 같은 묶음을 다시 뽑지 않도록 저장해 둔다. (설정을 바꿔 기준값을 다시 만들 때 빨라진다)
+    cache = os.path.join(FEATURE_CACHE_DIR, f"{name}{'_room' if room else ''}{f'_x{speed}' if speed != 1.0 else ''}.npy")
+    if os.path.exists(cache):
+        return np.load(cache)
 
     feats = []
     for i, item in enumerate(items):
         wave = load_audio(item["path"])
+        if speed != 1.0:  # 말 속도·목소리 높이를 바꾼다.
+            wave = change_speed(wave, speed)
         if room:  # 파일 ID로 난수를 정해서 언제 돌려도 같은 방 환경이 입혀진다.
             wave = random_room(wave, np.random.default_rng(zlib.crc32(item["file_id"].encode())))
         feats.append(pooled_feature(wave))
         if (i + 1) % 500 == 0:
             print(f"  {i + 1}/{len(items)}")
-    return np.stack(feats)
+    feats = np.stack(feats)
+    os.makedirs(FEATURE_CACHE_DIR, exist_ok=True)
+    np.save(cache, feats)
+    return feats
 
 
 # ===============================
@@ -72,23 +83,26 @@ def load_reference():  # feature_reference.npz → dict (explain.py가 쓴다)
 
 def build_reference():  # train real(+방 환경)으로 진짜 음성 무리를 정하고, dev real로 임계값을 정해 저장한다.
 
-    print(f"특징: {WAVLM_MODEL_NAME} {WAVLM_LAYER}층, 방 환경 real 포함: {FEATURE_MAHA_ROOM}")
+    print(f"특징: {WAVLM_MODEL_NAME} {WAVLM_LAYER}층, 방 환경 real 포함: {FEATURE_MAHA_ROOM}, 배속: {FEATURE_MAHA_SPEEDS}")
 
     train_parts = []  # 데이터마다 (파일 수, WAVLM_DIM)
     for data_name in FEATURE_MAHA_TRAIN:  # 예: 영어 train real, 한국어 train real
         items = select_bonafide(data_name)
         print(f"[{data_name}] real {len(items)}개")
-        train_parts.append(collect(items))
+        train_parts.append(collect(items, data_name))
         if FEATURE_MAHA_ROOM:
             print(f"[{data_name}] 같은 파일에 방 환경을 입힌 {len(items)}개")
-            train_parts.append(collect(items, room=True))
+            train_parts.append(collect(items, data_name, room=True))
+        for speed in FEATURE_MAHA_SPEEDS:  # 목소리 높이·말 속도를 바꾼 진짜 음성
+            print(f"[{data_name}] 같은 파일을 {speed}배속으로 바꾼 {len(items)}개")
+            train_parts.append(collect(items, data_name, speed=speed))
     train = np.concatenate(train_parts)
 
     dev_parts = []
     for data_name in FEATURE_MAHA_DEV:  # 임계값용 dev real
         items = select_bonafide(data_name)
         print(f"[{data_name}] real {len(items)}개 (임계값용)")
-        dev_parts.append(collect(items))
+        dev_parts.append(collect(items, data_name))
     dev = np.concatenate(dev_parts)
     dev_counts = [len(p) for p in dev_parts]  # 데이터마다 오탐률을 따로 보여 주려고
 
@@ -101,13 +115,13 @@ def build_reference():  # train real(+방 환경)으로 진짜 음성 무리를 
 
     dev_scores = distance(dev, ref)
     ref["dev_scores"] = dev_scores
-    ref["threshold"] = float(np.percentile(dev_scores, THRESHOLD_PERCENTILE))
-    ref["meta"] = np.array(f"{WAVLM_MODEL_NAME}|{WAVLM_LAYER}|room={FEATURE_MAHA_ROOM}|train={'+'.join(FEATURE_MAHA_TRAIN)}:{len(train)}"
+    ref["threshold"] = float(np.percentile(dev_scores, FEATURE_THRESHOLD_PERCENTILE))  # 특징 거리 전용 백분위 (config)
+    ref["meta"] = np.array(f"{WAVLM_MODEL_NAME}|{WAVLM_LAYER}|room={FEATURE_MAHA_ROOM}|speeds={FEATURE_MAHA_SPEEDS}|train={'+'.join(FEATURE_MAHA_TRAIN)}:{len(train)}"
                            f"|dev={'+'.join(FEATURE_MAHA_DEV)}:{len(dev)}|{time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     os.makedirs(os.path.dirname(FEATURE_REFERENCE_PATH), exist_ok=True)
     np.savez(FEATURE_REFERENCE_PATH, **ref)
-    print(f"진짜 음성 무리: {len(train)}개, 임계값(dev real {THRESHOLD_PERCENTILE}%): {ref['threshold']:.4f}")
+    print(f"진짜 음성 무리: {len(train)}개, 임계값(dev real {FEATURE_THRESHOLD_PERCENTILE}%): {ref['threshold']:.4f}")
     start = 0
     for data_name, n in zip(FEATURE_MAHA_DEV, dev_counts):  # 언어마다 dev real 오탐률 (한쪽만 높으면 임계값이 그쪽에 안 맞는다)
         part = dev_scores[start:start + n]

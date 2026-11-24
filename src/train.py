@@ -262,7 +262,7 @@ class MelCropDataset(Dataset):  # 파일 전체 Mel에서 매번 다른 위치�
 
     def __getitem__(self, i):  # i번째 파일에서 2초 조각 하나를 잘라 준다.
 
-        mel = self.mels[i]  # (80, 프레임 수)
+        mel = self.mels[i].float()  # (80, 프레임 수). TRAIN_FLOAT16으로 반정밀도 저장했으면 여기서 float32로 바꾼다.
         mask = self.masks[i]  # (프레임 수,)
         num_frames = mel.shape[1]  # 이 파일의 프레임 수
 

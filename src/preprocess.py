@@ -425,6 +425,13 @@ def random_room(wave, rng):  # 방 환경 값들을 범위 안에서 무작위�
     return add_room(wave, rt60, drr_db, snr_db, rng)
 
 
+def change_speed(wave, speed):  # 말 속도·목소리 높이를 함께 바꾼다. speed 1.2 = 1.2배 빠르고 약 3음 높게
+
+    # 테이프를 빨리 감는 것과 같다: 16kHz 소리를 16k/speed 샘플로 다시 뽑은 뒤 그대로 16kHz로 재생한다.
+    # 피치만 바꾸는 방법(phase vocoder)은 소리를 다시 합성하면서 합성 흔적 같은 왜곡을 만들어서 쓰지 않는다.
+    return librosa.resample(wave, orig_sr=SAMPLE_RATE, target_sr=int(round(SAMPLE_RATE / speed)), res_type="soxr_hq").astype(np.float32)
+
+
 def save_room_examples(path, out_dir):  # 같은 파일에 방 환경을 몇 가지로 입혀 저장한다. (직접 들어 보고 확인하기용)
 
     os.makedirs(out_dir, exist_ok=True)
@@ -485,7 +492,7 @@ def compute_stats(raw_logmels, masks):  # Mel 칸마다 평균과 표준편차�
 
     for logmel, mask in zip(raw_logmels, masks):  # 파일마다
         used = logmel[:, mask > 0]  # mask=1인 프레임만 사용한다.
-        total_sum += used.sum(axis=1)
+        total_sum += used.astype(np.float64).sum(axis=1)  # float16으로 저장했어도 합은 float64로 (넘침 방지)
         total_sq_sum += (used.astype(np.float64) ** 2).sum(axis=1)
         total_count += used.shape[1]
 
@@ -510,10 +517,24 @@ def select_bonafide(data_name):  # 해당 데이터에서 real(bonafide) 파일�
     return items
 
 
+def limit_frames(logmel, mask, rng):  # TRAIN_MAX_SEC보다 긴 파일은 무작위 위치에서 그 길이만 남긴다. (메모리 절약)
+
+    if TRAIN_MAX_SEC is None:
+        return logmel, mask
+    max_frames = int(TRAIN_MAX_SEC * SAMPLE_RATE) // FRAME_HOP
+    if logmel.shape[1] <= max_frames:
+        return logmel, mask
+    start = int(rng.integers(logmel.shape[1] - max_frames + 1))  # 시작 위치 (언제 돌려도 같도록 rng 사용)
+    return logmel[:, start:start + max_frames], mask[start:start + max_frames]
+
+
 def build_train(stats_out_path, train_out_path):  # train real → 통계 + 파일별 전체 log-Mel
 
     items = select_bonafide(TRAIN_DATA)  # train real 파일 목록
-    print(f"[train] real 파일 {len(items)}개 처리 시작")
+    for data_name in EXTRA_TRAIN_DATA:  # 더 넣을 real 데이터 (예: 한국어, KsponSpeech)
+        items += select_bonafide(data_name)
+    print(f"[train] real 파일 {len(items)}개 처리 시작 ({TRAIN_DATA} + {EXTRA_TRAIN_DATA})")
+    augment_choices = (["room"] if AUGMENT_ROOM else []) + [f"x{s}" for s in AUGMENT_SPEEDS]  # 배속을 쓸 때 고를 증강 후보
 
     raw_logmels, masks, file_ids = [], [], []  # 정규화 전 Mel, mask, 파일 ID
     rng = np.random.default_rng(SEED)  # 파일마다 어떤 코덱을 입힐지(와 pstn 대역 경계를) 고르는 난수. 언제 돌려도 같은 선택
@@ -521,10 +542,21 @@ def build_train(stats_out_path, train_out_path):  # train real → 통계 + 파�
 
     for i, item in enumerate(items):  # 파일마다
         wave = load_audio(item["path"])  # 음성을 한 번만 읽어서 원본과 증강본에 같이 쓴다.
-        logmel, mask = wave_to_input(wave)  # 정규화 전 log-Mel과 mask
-        raw_logmels.append(logmel)
+        logmel, mask = limit_frames(*wave_to_input(wave), rng)  # 정규화 전 log-Mel과 mask (TRAIN_MAX_SEC면 길이 제한)
+        raw_logmels.append(logmel.astype(np.float16) if TRAIN_FLOAT16 else logmel)  # 메모리를 아끼려면 반정밀도로
         masks.append(mask)
         file_ids.append(item["file_id"])
+
+        if AUGMENT_SPEEDS:  # 배속을 쓰면: 방 환경과 배속 중 하나만 무작위로 골라 증강본 1개 (메모리 때문)
+            choice = augment_choices[rng.integers(len(augment_choices))]
+            augmented = random_room(wave, rng) if choice == "room" else change_speed(wave, float(choice[1:]))
+            logmel, mask = limit_frames(*wave_to_input(augmented), rng)
+            raw_logmels.append(logmel.astype(np.float16) if TRAIN_FLOAT16 else logmel)
+            masks.append(mask)
+            file_ids.append(f"{item['file_id']}@{choice}")  # 예: LA_T_1138215@x1.2
+            if (i + 1) % 500 == 0:
+                print(f"  {i + 1}/{len(items)}")
+            continue  # 아래의 방 환경 증강(따로 1개)은 건너뛴다.
 
         if AUGMENT_CODEC:  # 코덱 증강: 같은 파일을 코덱에 통과시킨 소리로 하나 더 만든다.
             augment = AUGMENT_CODECS[rng.integers(len(AUGMENT_CODECS))]  # 학습 코덱 중 하나를 무작위로
@@ -556,7 +588,10 @@ def build_train(stats_out_path, train_out_path):  # train real → 통계 + 파�
     stats = compute_stats(raw_logmels, masks)  # train real로만 통계를 계산한다.
     torch.save({"mean": torch.from_numpy(stats["mean"]), "std": torch.from_numpy(stats["std"])}, stats_out_path)
 
-    mels = [torch.from_numpy(normalize_logmel(m, stats)) for m in raw_logmels]  # 정규화한 뒤 텐서로 바꾼다.
+    mels = raw_logmels  # 메모리를 아끼려고 같은 목록에 하나씩 바꿔 넣는다. (복사본을 따로 만들지 않는다)
+    for k in range(len(mels)):
+        normalized = normalize_logmel(mels[k].astype(np.float32), stats)  # 정규화
+        mels[k] = torch.from_numpy(normalized.astype(np.float16) if TRAIN_FLOAT16 else normalized)  # 텐서로
     torch.save({  # 파일마다 길이가 달라서 목록(list)으로 저장한다.
         "mels": mels,  # 각각 (80, 프레임 수)
         "masks": [torch.from_numpy(m) for m in masks],  # 각각 (프레임 수,)
@@ -566,7 +601,7 @@ def build_train(stats_out_path, train_out_path):  # train real → 통계 + 파�
     total_frames = sum(m.shape[1] for m in mels)  # 전체 프레임 수
     print(f"[train] 저장 완료: 파일 {len(mels)}개, 전체 {total_frames}프레임 (약 {total_frames * FRAME_HOP / SAMPLE_RATE / 60:.1f}분)")
 
-    return stats, mels[0], torch.from_numpy(masks[0])  # 확인용 그림에 쓸 첫 파일도 돌려준다.
+    return stats, mels[0].float(), torch.from_numpy(masks[0])  # 확인용 그림에 쓸 첫 파일도 돌려준다.
 
 
 def build_val(stats, val_out_path):  # dev real → 고정 2초 조각
