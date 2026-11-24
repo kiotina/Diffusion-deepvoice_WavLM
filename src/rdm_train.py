@@ -1,13 +1,13 @@
 # ===============================
 # rdm_train.py
-# train real 파일 벡터(XLS-R 22층 프레임 평균, 1024)만으로 작은 MLP 디퓨전을 학습한다.
+# 학습 real 파일 벡터(XLS-R 22층 프레임 평균, 1024)만으로 작은 MLP 디퓨전을 학습한다.
 # 디퓨전 부분(노이즈 일정, 노이즈 섞기, t 임베딩, ε 예측, MSE)은 train.py와 똑같다. 노이즈를 맞히는 선수만 U-Net → MLP로 바뀐다.
 #   입력이 그림(2D)이 아니라 숫자 1024개가 한 줄로 놓인 벡터라서 "주변 칸"을 보는 Conv가 필요 없다. Linear로 충분하다.
 #
-# 읽는 파일: outputs/rdm_xlsr_l22/features/train.npz, dev.npz (rdm_features.py가 만든 것)
-# 만드는 파일 (outputs/rdm_xlsr_l22/checkpoints 폴더)
+# 읽는 파일: outputs/rdm_features_xlsr_l22/ 의 RDM_TRAIN_DATA·RDM_DEV_DATA 벡터 (rdm_features.py가 만든 것)
+# 만드는 파일 (outputs/<RDM_RUN_NAME>/checkpoints 폴더)
 #   best.pt         : dev real 손실이 가장 낮았던 모델 + 표준화 통계(train real 평균·표준편차)
-#   history.csv     : RDM_VAL_EVERY epoch마다 train/dev 손실
+#   history.csv     : RDM_VAL_EVERY걸음마다 train/dev 손실
 #   loss_curve.png  : 손실 곡선
 # ===============================
 
@@ -23,7 +23,7 @@ import torch  # 텐서 계산과 학습
 import torch.nn as nn  # 신경망 층(Linear, LayerNorm 등)
 
 from config import *  # config.py의 모든 설정값을 가져온다.
-from rdm_features import load_split  # 저장한 파일 벡터를 불러온다.
+from rdm_features import load_many  # 저장한 파일 벡터를 불러온다.
 from train import forward_diffusion, get_timestep_embedding, select_random_timesteps  # U-Net 학습과 같은 디퓨전 부품
 
 CHECKPOINT_DIR_RDM = os.path.join(RDM_DIR, "checkpoints")  # 학습한 모델을 저장할 폴더
@@ -127,11 +127,11 @@ def validate(model, x_dev, val_t, val_noise):  # dev real 평균 MSE
 
 def save_loss_curve(history, out_path):  # train/dev 손실 곡선
 
-    epochs = [row["epoch"] for row in history]
+    steps = [row["step"] for row in history]
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(epochs, [row["train_loss"] for row in history], label="train")
-    ax.plot(epochs, [row["val_loss"] for row in history], label="val (dev real)")
-    ax.set_xlabel("epoch")
+    ax.plot(steps, [row["train_loss"] for row in history], label="train")
+    ax.plot(steps, [row["val_loss"] for row in history], label="val (dev real)")
+    ax.set_xlabel("step")
     ax.set_ylabel("MSE")
     ax.set_title(f"{RDM_RUN_NAME}: XLS-R layer {XLSR_LAYER} file vectors")
     ax.legend()
@@ -149,12 +149,14 @@ if __name__ == "__main__":
     os.makedirs(CHECKPOINT_DIR_RDM, exist_ok=True)
 
     # ----- 데이터: train real로 표준화 통계를 정하고 train·dev에 똑같이 적용 -----
-    train_vectors = load_split("train")["vectors"]  # (2580, 1024)
-    dev_vectors = load_split("dev")["vectors"]  # (2548, 1024)
+    variants = ("clean", "aug") if RDM_AUGMENT else ("clean",)  # 증강을 쓰면 원본과 증강본을 함께
+    train_vectors = load_many(RDM_TRAIN_DATA, variants)["vectors"]  # (학습 real 수, 1024)
+    dev_vectors = load_many(RDM_DEV_DATA)["vectors"]  # (dev real 수, 1024), 원본 그대로
     mean, std = compute_stats(train_vectors)
     x_train = torch.tensor(standardize(train_vectors, mean, std), device=DEVICE)  # 벡터가 작아서 전부 GPU에 올려 둔다.
     x_dev = torch.tensor(standardize(dev_vectors, mean, std), device=DEVICE)
-    print(f"train {tuple(x_train.shape)}, dev {tuple(x_dev.shape)}, 표준화 뒤 train 값 범위 {x_train.min():.1f} ~ {x_train.max():.1f}")
+    print(f"학습 {RDM_TRAIN_DATA} × {variants}: {tuple(x_train.shape)}, dev {RDM_DEV_DATA}: {tuple(x_dev.shape)}")
+    print(f"표준화 뒤 train 값 범위 {x_train.min():.1f} ~ {x_train.max():.1f}")
 
     # ----- 모델 -----
     model = RDM().to(DEVICE)
@@ -162,35 +164,40 @@ if __name__ == "__main__":
     print(f"RDM 가중치 {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
     val_t, val_noise = make_val_problem(len(x_dev))
 
-    # ----- 학습 -----
+    # ----- 학습: RDM_STEPS걸음. 학습 real을 섞어서 앞에서부터 256개씩, 다 쓰면 다시 섞는다 -----
     history, best_loss, start = [], float("inf"), time.time()
-    for epoch in range(1, RDM_EPOCHS + 1):
-        order = torch.randperm(len(x_train), device=DEVICE)  # epoch마다 순서를 섞는다.
-        for idx in order.split(RDM_BATCH_SIZE):  # 256개씩
-            x0 = x_train[idx]  # (B, 1024)
-            t = select_random_timesteps(len(idx))  # 벡터마다 무작위 t
-            x_t, noise = forward_diffusion(x0, t)  # 노이즈를 섞는다.
-            loss = ((model(x_t, t) - noise) ** 2).mean()  # 섞인 노이즈를 얼마나 맞혔나 (MSE)
+    order, pos = torch.randperm(len(x_train), device=DEVICE), 0  # 순서와 지금 위치
+    for step in range(1, RDM_STEPS + 1):
+        if pos + RDM_BATCH_SIZE > len(x_train):  # 한 바퀴(epoch)를 다 돌면 순서를 다시 섞는다.
+            order, pos = torch.randperm(len(x_train), device=DEVICE), 0
+        idx = order[pos:pos + RDM_BATCH_SIZE]  # 이번 묶음 256개
+        pos += RDM_BATCH_SIZE
 
-            optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)  # gradient가 갑자기 커지는 것을 막는다.
-            optimizer.step()
+        x0 = x_train[idx]  # (B, 1024)
+        t = select_random_timesteps(len(idx))  # 벡터마다 무작위 t
+        x_t, noise = forward_diffusion(x0, t)  # 노이즈를 섞는다.
+        loss = ((model(x_t, t) - noise) ** 2).mean()  # 섞인 노이즈를 얼마나 맞혔나 (MSE)
 
-        if epoch % RDM_VAL_EVERY == 0:  # 50 epoch마다 dev real 손실
+        optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)  # gradient가 갑자기 커지는 것을 막는다.
+        optimizer.step()
+
+        if step % RDM_VAL_EVERY == 0:  # 500걸음마다 dev real 손실
             val_loss = validate(model, x_dev, val_t, val_noise)
-            history.append({"epoch": epoch, "train_loss": loss.item(), "val_loss": val_loss})
+            history.append({"step": step, "train_loss": loss.item(), "val_loss": val_loss})
             if val_loss < best_loss:  # 가장 좋았던 모델만 남긴다. (조기 종료와 같은 효과)
                 best_loss = val_loss
-                torch.save({"epoch": epoch, "val_loss": val_loss, "layer": XLSR_LAYER,
+                torch.save({"step": step, "val_loss": val_loss, "layer": XLSR_LAYER,
+                            "train_data": RDM_TRAIN_DATA, "augment": RDM_AUGMENT,  # 무엇으로 학습했는지
                             "mean": mean, "std": std,  # 평가·웹에서 똑같이 표준화하려고 함께 저장한다.
                             "model": model.state_dict()}, os.path.join(CHECKPOINT_DIR_RDM, "best.pt"))
-            if epoch % (RDM_VAL_EVERY * 10) == 0:  # 500 epoch마다 출력
-                print(f"epoch {epoch:4d} | train {loss.item():.4f} | dev real {val_loss:.4f} | best {best_loss:.4f} | {time.time() - start:.0f}초")
+            if step % (RDM_VAL_EVERY * 10) == 0:  # 5,000걸음마다 출력
+                print(f"step {step:5d} | train {loss.item():.4f} | dev real {val_loss:.4f} | best {best_loss:.4f} | {time.time() - start:.0f}초")
 
     # ----- 기록 -----
     with open(os.path.join(CHECKPOINT_DIR_RDM, "history.csv"), "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_loss"])
+        writer = csv.DictWriter(f, fieldnames=["step", "train_loss", "val_loss"])
         writer.writeheader()
         writer.writerows(history)
     save_loss_curve(history, os.path.join(CHECKPOINT_DIR_RDM, "loss_curve.png"))

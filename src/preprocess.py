@@ -23,6 +23,7 @@ matplotlib.use("Agg")  # 창을 띄우지 않고 파일로만 저장한다.
 import matplotlib.pyplot as plt  # 그림을 그린다.
 import numpy as np  # 숫자 배열을 계산한다.
 import torch  # 결과를 PyTorch 텐서로 저장한다.
+from scipy.signal import fftconvolve  # 방 울림 입히기 (긴 소리도 빠르게 합성곱)
 
 from config import *  # config.py의 모든 설정값을 가져온다.
 
@@ -59,9 +60,34 @@ def read_protocol(data_name):  # data_name: config.py의 DATASETS 이름 (예: "
     return items  # 파일 정보 목록을 돌려준다.
 
 
+def read_folder(data_name):  # 라벨 파일 없이 폴더 안의 wav를 모두 real로 읽는다. (한국어 데이터용) read_protocol과 같은 모양으로 돌려준다.
+
+    dataset = DATASETS[data_name]  # 음성 폴더, 이 데이터에 넣을 화자 목록
+    items = []
+
+    for folder, sub_folders, files in os.walk(dataset["audio_dir"]):  # 음성 폴더 아래의 모든 폴더를 하나씩 본다.
+        sub_folders.sort()  # 폴더를 이름순으로 돌아서, 언제 실행해도 파일 순서가 같게 한다.
+        speaker_id = os.path.basename(folder)  # 화자마다 폴더 하나라서 폴더 이름을 화자 ID로 쓴다.
+        if not any(key in speaker_id for key in dataset["speakers"]):  # 이 데이터의 화자가 아니면 건너뛴다. (train 화자가 dev에 섞이지 않게)
+            continue
+        for name in sorted(files):  # 파일 이름순으로
+            if name.lower().endswith(".wav"):
+                items.append({"path": os.path.join(folder, name), "speaker_id": speaker_id,
+                              "file_id": os.path.splitext(name)[0], "attack_id": "-", "label": "bonafide"})  # 모두 진짜 사람 음성
+
+    if len(items) == 0:  # 하나도 못 찾았으면 폴더 경로나 화자 이름이 잘못된 것이다.
+        raise ValueError(f"{data_name}: wav를 하나도 찾지 못했다. config.py의 audio_dir와 speakers를 확인할 것")
+    print(f"[{data_name}] 화자 {len({it['speaker_id'] for it in items})}명, 파일 {len(items)}개")
+
+    return items
+
+
 def select_bonafide(data_name):  # 해당 데이터에서 real(bonafide) 파일만 고른다. (real-only)
 
-    items = [item for item in read_protocol(data_name) if item["label"] == "bonafide"]
+    if "speakers" in DATASETS[data_name]:  # 라벨 파일이 없는 폴더형 데이터 (한국어)
+        items = read_folder(data_name)
+    else:  # ASVspoof: 라벨 파일에서 bonafide만
+        items = [item for item in read_protocol(data_name) if item["label"] == "bonafide"]
 
     if FILE_LIMIT is not None:  # 개발용으로 개수를 줄인 경우
         items = items[:FILE_LIMIT]  # 앞에서부터 FILE_LIMIT개만 사용한다.
@@ -124,6 +150,58 @@ def load_audio(path):  # 음성 파일 하나를 읽는다. 학습·검증·평�
     # 파일별 스펙트로그램 정규화 같은 "음색을 바꾸는" 정규화는 하지 않는다. 합성 흔적을 지울 수 있어서.
 
     return wave.astype(np.float32)  # 32비트 실수로 돌려준다.
+
+
+# ===============================
+# 2-1. 증강: 방 환경, 배속 (load_audio를 거친 소리에 입힌다)
+# ===============================
+
+def pink_noise(length, rng):  # 핑크 노이즈: 저음이 크고 고음으로 갈수록 약해지는 잡음 (방·마이크의 바닥 잡음과 비슷)
+
+    spectrum = np.fft.rfft(rng.standard_normal(length))  # 화이트 노이즈(모든 주파수가 같은 세기)를 주파수로 바꾼다.
+    freqs = np.fft.rfftfreq(length, d=1 / SAMPLE_RATE)  # 각 칸의 주파수(Hz)
+    keep = freqs >= ROOM_NOISE_LOW_HZ  # 귀에 거의 안 들리는 초저음은 뺀다.
+    spectrum[keep] /= np.sqrt(freqs[keep])  # 세기가 1/주파수가 되도록 → 진폭은 1/√주파수
+    spectrum[~keep] = 0
+    noise = np.fft.irfft(spectrum, length)  # 다시 소리로
+
+    return noise / np.sqrt(np.mean(noise ** 2))  # 크기(RMS)를 1로 맞춘다. 실제 크기는 add_room에서 SNR로 정한다.
+
+
+def room_impulse(rt60, drr_db, rng):  # 방의 잔향 응답: "손뼉을 한 번 쳤을 때 마이크에 들리는 소리"
+
+    t = np.arange(1, int(rt60 * SAMPLE_RATE)) / SAMPLE_RATE  # 울림이 이어지는 시간 (직접 들어온 소리 바로 다음부터 RT60까지)
+    tail = rng.standard_normal(len(t)) * np.exp(-np.log(1000) * t / rt60)  # 무작위 반사음이 점점 작아진다. RT60초 뒤에 1/1000 = -60dB
+    tail *= np.sqrt(10 ** (-drr_db / 10) / np.sum(tail ** 2))  # 울림 전체의 에너지를 "직접 들어온 소리(1)보다 DRR dB 작게" 맞춘다.
+
+    return np.concatenate([[1.0], tail])  # 맨 앞 1 = 입에서 마이크로 바로 들어온 소리, 그 뒤 = 벽에 반사된 울림
+
+
+def add_room(wave, rng):  # 방 울림 → 앞뒤에 잡음만 있는 구간 → 핑크 노이즈로 전체 덮기. 값은 config 범위에서 무작위로
+
+    rt60, drr_db, snr_db = (rng.uniform(*r) for r in (ROOM_RT60_RANGE, ROOM_DRR_RANGE, ROOM_SNR_RANGE))
+    wet = fftconvolve(wave, room_impulse(rt60, drr_db, rng))  # (FFT로 빠르게) 말소리에 방 울림을 입힌다. (끝에 RT60만큼 울림 꼬리가 붙는다)
+    pads = [np.zeros(int(rng.uniform(*ROOM_PAD_SEC_RANGE) * SAMPLE_RATE)) for _ in range(2)]  # 앞, 뒤 빈 구간 (아래에서 잡음으로 덮인다)
+    padded = np.concatenate([pads[0], wet, pads[1]])
+    noise = pink_noise(len(padded), rng) * np.sqrt(np.mean(wet ** 2)) / 10 ** (snr_db / 20)  # 말소리 크기보다 SNR dB만큼 작은 바닥 잡음
+
+    return normalize_peak(padded + noise).astype(np.float32)  # 크기를 다시 1.0으로 (실제 녹음도 load_audio에서 이렇게 맞춘다)
+
+
+def change_speed(wave, speed):  # 말 속도·목소리 높이를 함께 바꾼다. speed 1.2 = 1.2배 빠르고 약 3음 높게
+
+    # 16kHz 소리를 16k/speed 샘플로 다시 뽑은 뒤 그대로 16kHz로 재생한다. (테이프 빨리 감기)
+    # 피치만 바꾸는 방법은 소리를 다시 합성하면서 합성 흔적 같은 왜곡을 만들어서 쓰지 않는다.
+    return librosa.resample(wave, orig_sr=SAMPLE_RATE, target_sr=int(round(SAMPLE_RATE / speed)), res_type="soxr_hq").astype(np.float32)
+
+
+def augment(wave, rng):  # 증강본 하나: 방 환경 또는 배속(0.9, 1.1, 1.2) 중 무작위 하나. 반환: (소리, 이름)
+
+    choice = rng.integers(1 + len(AUGMENT_SPEEDS))  # 0 = 방 환경, 1~3 = 배속
+    if choice == 0:
+        return add_room(wave, rng), "room"
+    speed = AUGMENT_SPEEDS[choice - 1]
+    return change_speed(wave, speed), f"speed{speed}"
 
 
 # ===============================

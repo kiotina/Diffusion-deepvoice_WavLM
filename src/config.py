@@ -17,6 +17,8 @@ import torch  # GPU 사용 가능 여부를 확인하고 난수 시작값을 고
 DATASET_ROOT = r"H:\Workspace\Dataset"  # 모든 데이터셋이 들어 있는 폴더
 LA2019_ROOT = os.path.join(DATASET_ROOT, "LA")  # ASVspoof 2019 LA (train, dev, eval)
 LA2021_ROOT = os.path.join(DATASET_ROOT, "ASVspoof2021_LA_eval")  # ASVspoof 2021 LA (eval만 있다)
+KO_ROOT = os.path.join(DATASET_ROOT, "원천데이터")  # AIHub 한국어 음성 (모두 진짜 사람 음성. 화자마다 폴더 하나)
+KSPON_WAV_DIR = os.path.join(DATASET_ROOT, "AI-Hub_한국어 음성", "wav")  # KsponSpeech(약 2,000명 자유 대화)에서 골라 꺼낸 wav (train/, dev/. xlsr-final 태그의 prepare_kspon.py)
 
 # 라벨 파일 한 줄에서 몇 번째 칸(0부터 센다)에 무엇이 있는지
 COLUMNS_2019 = {"speaker_id": 0, "file_id": 1, "attack_id": 3, "label": 4}  # 예: "LA_0079 LA_T_1138215 - - bonafide"
@@ -44,6 +46,23 @@ DATASETS = {  # 데이터 이름 → 라벨 파일, 음성 폴더, 칸 번호. �
         "audio_dir": os.path.join(LA2021_ROOT, "flac"),
         "columns": COLUMNS_2021,
     },
+    # 한국어 데이터에는 라벨 파일이 없다. 폴더를 뒤져 wav를 모두 찾고(전부 real), 폴더 이름(= 화자)으로 train/dev를 나눈다.
+    # "speakers"에는 화자 폴더 이름의 일부를 적는다. 폴더 이름이 이 중 하나를 포함하면 그 데이터에 넣는다.
+    "ko_train": {
+        "audio_dir": KO_ROOT,
+        "speakers": [
+            "KYG",  # 녹음 부스, TTS 학습용 데이터 (원래 48kHz → 읽을 때 16kHz로 바꾼다)
+            "1526752256",  # 자유대화, 실내, 남성
+            "1527404971",  # 자유대화, 실내, 남성
+            "1524374974",  # 자유대화, 실내, 여성
+        ],
+    },
+    "ko_dev": {
+        "audio_dir": KO_ROOT,
+        "speakers": ["1536505292"],  # 자유대화, 실내, 여성. 학습에 안 쓴 화자로 임계값을 정한다. (real-only)
+    },
+    "kspon_train": {"audio_dir": os.path.join(KSPON_WAV_DIR, "train"), "speakers": ["KsponSpeech_"]},  # 세션 폴더 = 화자 자리
+    "kspon_dev": {"audio_dir": os.path.join(KSPON_WAV_DIR, "dev"), "speakers": ["eval_"]},  # eval_clean, eval_other (train과 다른 화자)
 }
 
 TRAIN_DATA = "2019_train"  # 학습에 쓸 데이터 (bona fide만 사용)
@@ -87,6 +106,19 @@ SILENCE_DB_THRESHOLD = -40.0  # 가장 큰 소리보다 이만큼(dB) 작으면 
 # 크기 맞추기(×1/최대 진폭)를 하면 마이크가 꺼진 녹음의 아주 작은 잡음이 크게 부풀어 "음성"처럼 들어가기 때문이다.
 # ASVspoof는 모두 최대 진폭 1.0이라 걸리지 않는다.
 MIN_PEAK = 0.001
+
+# 방 환경 증강 (rdm_features.py가 학습 real에 쓴다. 평가에서는 eval에 입혀 "방에서 녹음한 소리"에서도 버티는지 본다)
+# real-only 모델은 처음 보는 녹음 조건을 모두 "낯설다 = fake"로 본다. (예전: 방 환경 real 오탐 96% → 증강 뒤 2%)
+# 실제로 녹음할 환경(조용한 방 + 폰·노트북 마이크)에 있는 두 가지만 가볍게 입힌다. 둘 다 코드로 직접 만든다.
+#   1) 방 울림: 벽에 반사된 소리가 조금 늦게 섞인다. (2019 real은 스튜디오 녹음이라 울림이 거의 없다)
+#   2) 핑크 노이즈: 방·마이크의 바닥 잡음. 저음이 크고 고음으로 갈수록 약하다. (고음은 합성 흔적이 많은 곳이라 화이트 노이즈는 안 쓴다)
+ROOM_RT60_RANGE = (0.15, 0.6)  # 울림 길이(초): 소리가 60dB 작아질 때까지 걸리는 시간. 0.15 = 작은 방, 0.6 = 거실 정도
+ROOM_DRR_RANGE = (5.0, 15.0)  # 직접 들어온 소리와 울림의 크기 차이(dB). 클수록 마이크가 입에 가깝다.
+ROOM_SNR_RANGE = (25.0, 40.0)  # 말소리와 바닥 잡음의 크기 차이(dB). 배경에 살짝 깔리는 정도
+ROOM_NOISE_LOW_HZ = 50.0  # 핑크 노이즈에서 이보다 낮은 소리는 뺀다. (귀에 안 들리는 초저음에 힘이 몰려서)
+ROOM_PAD_SEC_RANGE = (0.0, 1.0)  # 앞뒤에 붙이는 "잡음만 있는 구간" 길이(초). 실제 녹음은 말 앞뒤에 방 잡음이 깔린다.
+# 배속 증강: 말 속도·목소리 높이를 함께 바꾼다. (테이프를 빨리 감는 것과 같다) 목소리가 높거나 빠른 real도 real로 보게
+AUGMENT_SPEEDS = [0.9, 1.1, 1.2]  # 0.9 = 약 2음 낮게, 1.1 = 약 2음 높게, 1.2 = 약 3음 높게
 
 
 # ===============================
@@ -189,18 +221,27 @@ THRESHOLD_PERCENTILE = 95  # dev bona fide 파일 점수의 95백분위를 임�
 # 음성 파일 하나 → XLS-R 22층 프레임 특징 → 프레임 평균 = 벡터 하나(1024). 그 벡터들 위에서 작은 MLP 디퓨전을 real만으로 학습한다.
 # XLS-R은 숫자로 바꾸는 일만 하고(학습하지 않음), 판정은 디퓨전의 노이즈 예측 오차로 한다.
 # 프레임마다 디퓨전을 돌리면 오차가 "그 순간 소리가 얼마나 복잡한가"에 흔들렸다(EER 20%). 파일 평균으로 그 흔들림을 없앤다. (EER 11%)
-RDM_RUN_NAME = "rdm_xlsr_l22"  # 결과 폴더 이름 (outputs/rdm_xlsr_l22/)
-RDM_DIR = os.path.join(OUTPUT_DIR, RDM_RUN_NAME)
 XLSR_MODEL = "facebook/wav2vec2-xls-r-300m"  # 사전학습 음성 모델 (128개 언어, 약 3억 가중치). 처음 실행 때 내려받는다.
 XLSR_LAYER = 22  # 24층 중 몇 번째 층을 쓸지. 19~24층 중 22층 (층 후보는 eval을 본 비교에서 나왔다 → 발표 때 밝힌다)
 XLSR_DIM = 1024  # XLS-R 한 층의 특징 차원 = 디퓨전 입력 크기
+# 파일 벡터는 데이터·증강마다 이 폴더에 한 번만 뽑아 두고, 여러 모델이 나눠 쓴다. (예: 2019_train_clean.npz, ko_train_aug.npz)
+RDM_FEATURE_DIR = os.path.join(OUTPUT_DIR, f"rdm_features_xlsr_l{XLSR_LAYER}")
+
+# 모델 두 개 (논문용 = 영어, 시연용 = 영어 + 한국어 + 증강). 아래 세 줄만 바꿔서 고른다.
+#   영어:  RDM_RUN_NAME = "rdm_xlsr_l22",       RDM_TRAIN_DATA = ["2019_train"], RDM_DEV_DATA = ["2019_dev"], RDM_AUGMENT = False  (EER 11.49%)
+#   시연:  RDM_RUN_NAME = "rdm_xlsr_l22_multi", 아래 값
+RDM_RUN_NAME = "rdm_xlsr_l22_multi"  # 결과 폴더 이름 (outputs/<RDM_RUN_NAME>/)
+RDM_TRAIN_DATA = ["2019_train", "ko_train", "kspon_train"]  # 학습할 real (영어 + 한국어)
+RDM_DEV_DATA = ["2019_dev", "ko_dev", "kspon_dev"]  # 조기 종료·보정·임계값용 real (학습에 안 쓴 화자들, 깨끗한 그대로)
+RDM_AUGMENT = True  # True면 학습 real마다 증강본 하나를 더한다. (방 환경 또는 배속 중 무작위 하나)
+RDM_DIR = os.path.join(OUTPUT_DIR, RDM_RUN_NAME)
 
 RDM_HIDDEN = 1024  # MLP 안쪽 크기
 RDM_BLOCKS = 3  # MLP 잔차 블록 수
 RDM_DROPOUT = 0.1  # real 표본이 2,580개뿐이라 외우지 않도록 일부 값을 무작위로 끈다.
 RDM_BATCH_SIZE = 256  # 벡터는 작아서 한 번에 많이 넣는다.
-RDM_EPOCHS = 4000  # epoch당 약 10걸음 → 4만 걸음 (한 번 학습에 몇 분)
-RDM_VAL_EVERY = 50  # 이 epoch마다 dev real 손실을 재고, 가장 낮았던 모델을 남긴다.
+RDM_STEPS = 40000  # 학습 걸음 수 (걸음 하나 = 256개 묶음 하나). 데이터 양이 달라도 학습 길이가 같도록 epoch 대신 걸음으로 센다.
+RDM_VAL_EVERY = 500  # 이 걸음마다 dev real 손실을 재고, 가장 낮았던 모델을 남긴다.
 RDM_NOISE_COUNT = 16  # 점수를 낼 때 t마다 고정 노이즈 16개로 시험을 보고 평균한다. (벡터 하나라 싸다)
 # 점수용 t는 SCORE_TIMESTEPS(50/100/200), 임계값은 THRESHOLD_PERCENTILE(95)을 그대로 쓴다.
 

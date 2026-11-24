@@ -7,12 +7,11 @@
 #   → t마다 (예측 − 정답)²의 평균 = 오차 3개 → dev real 기준 z-점수 3개 → 평균 = 파일 점수 (클수록 real답지 않다)
 # 판정: 파일 점수 > dev real 파일 점수의 95백분위 → spoof
 #
-# 읽는 파일: features/dev.npz, eval.npz (rdm_features.py), checkpoints/best.pt (rdm_train.py)
-# 만드는 파일 (outputs/rdm_xlsr_l22/evaluation_<EVAL_DATA> 폴더)
+# 읽는 파일: outputs/rdm_features_xlsr_l22/ 의 dev·eval 벡터 (rdm_features.py), checkpoints/best.pt (rdm_train.py)
+# 만드는 파일 (outputs/<RDM_RUN_NAME>/evaluation_<EVAL_DATA> 폴더)
 #   calibration.json : dev real로 정한 t별 평균·표준편차와 임계값 (웹 서버도 이 값을 쓴다)
-#   metrics.json     : EER, AUROC, 오탐률, 탐지율, 공격별 지표
-#   predictions.csv  : eval 파일마다 점수와 판정
-#   score_hist.png   : real·fake 점수 분포와 임계값
+#   metrics_<clean|room>.json, predictions_<clean|room>.csv, score_hist_<clean|room>.png
+#                    : 깨끗한 eval, 방 환경을 입힌 eval 각각의 지표·파일별 판정·점수 분포
 #   test_samples.csv : 시험지 파일마다 점수와 판정
 # ===============================
 
@@ -29,7 +28,7 @@ import torch  # 모델 실행
 from config import *  # config.py의 모든 설정값을 가져온다.
 from evaluate import compute_metrics  # EER·AUROC·공격별 지표는 스펙트로그램 실험과 똑같이 계산한다.
 from preprocess import load_audio  # 시험지 음성 읽기
-from rdm_features import file_vector, load_split, load_xlsr  # 파일 벡터 (학습 때와 똑같이)
+from rdm_features import file_vector, load_many, load_xlsr  # 파일 벡터 (학습 때와 똑같이)
 from rdm_train import CHECKPOINT_DIR_RDM, RDM, standardize  # 모델과 표준화
 from train import forward_diffusion  # 노이즈 섞기 (학습 때와 똑같이)
 
@@ -48,7 +47,7 @@ def load_rdm():  # best.pt → (모델, 표준화 평균, 표준편차)
     model = RDM().to(DEVICE)
     model.load_state_dict(checkpoint["model"])
     model.eval()  # Dropout을 끈다. (늘 같은 점수가 나오도록)
-    print(f"RDM: epoch {checkpoint['epoch']}, dev real 손실 {checkpoint['val_loss']:.4f}")
+    print(f"RDM: {checkpoint['train_data']} (증강 {checkpoint['augment']}), step {checkpoint['step']}, dev real 손실 {checkpoint['val_loss']:.4f}")
 
     return model, checkpoint["mean"], checkpoint["std"]
 
@@ -158,30 +157,32 @@ if __name__ == "__main__":
     noises = make_fixed_noises()
 
     # ----- dev real: 보정과 임계값 (fake는 쓰지 않는다) -----
-    dev_errors = measure_errors(model, standardize(load_split("dev")["vectors"], mean, std), noises)  # (2548, 3)
+    dev = load_many(RDM_DEV_DATA)  # 학습에 안 쓴 화자들 (영어·한국어), 원본 그대로
+    dev_errors = measure_errors(model, standardize(dev["vectors"], mean, std), noises)  # (dev 수, 3)
     calibration = calibrate(dev_errors)
     dev_scores = file_scores(dev_errors, calibration)
-    calibration["threshold"] = float(np.percentile(dev_scores, THRESHOLD_PERCENTILE))  # dev real 95백분위
+    calibration["threshold"] = float(np.percentile(dev_scores, THRESHOLD_PERCENTILE))  # dev real 전체의 95백분위
     with open(os.path.join(EVAL_DIR_RDM, "calibration.json"), "w", encoding="utf-8") as f:
         json.dump(calibration, f, indent=2)
     print(f"dev real 오차 t{SCORE_TIMESTEPS}: 평균 {np.round(calibration['mean'], 4)}, 임계값 {calibration['threshold']:.3f}")
+    for source in np.unique(dev["source"]):  # dev 묶음마다 오탐률 (한 언어만 유난히 높으면 그 언어 real을 덜 배운 것)
+        part = dev_scores[dev["source"] == source]
+        print(f"  {source:18s} {len(part):5d}개 | 점수 중앙값 {np.median(part):6.2f} | 오탐 {np.mean(part > calibration['threshold']) * 100:4.1f}%")
 
-    # ----- eval: 여기서 처음 fake를 본다 -----
-    data = load_split("eval")
-    eval_errors = measure_errors(model, standardize(data["vectors"], mean, std), noises)
-    scores = file_scores(eval_errors, calibration)
-    results = [{"label": l, "attack_id": a, "score": s} for l, a, s in zip(data["label"], data["attack_id"], scores)]
-    metrics = compute_metrics(results, "score", calibration["threshold"])
-    with open(os.path.join(EVAL_DIR_RDM, "metrics.json"), "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2, ensure_ascii=False)
-    save_predictions(data, scores, calibration["threshold"], os.path.join(EVAL_DIR_RDM, "predictions.csv"))
-    save_score_hist(scores, data["label"], calibration["threshold"], os.path.join(EVAL_DIR_RDM, "score_hist.png"))
+    # ----- eval: 여기서 처음 fake를 본다. 깨끗한 그대로, 방 환경을 입힌 것 -----
+    for variant in ["clean", "room"]:
+        data = load_many([EVAL_DATA], (variant,))
+        scores = file_scores(measure_errors(model, standardize(data["vectors"], mean, std), noises), calibration)
+        results = [{"label": l, "attack_id": a, "score": s} for l, a, s in zip(data["label"], data["attack_id"], scores)]
+        metrics = compute_metrics(results, "score", calibration["threshold"])
+        with open(os.path.join(EVAL_DIR_RDM, f"metrics_{variant}.json"), "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2, ensure_ascii=False)
+        save_predictions(data, scores, calibration["threshold"], os.path.join(EVAL_DIR_RDM, f"predictions_{variant}.csv"))
+        save_score_hist(scores, data["label"], calibration["threshold"], os.path.join(EVAL_DIR_RDM, f"score_hist_{variant}.png"))
 
-    print(f"\n{EVAL_DATA} ({len(scores)}개) | EER {metrics['eer'] * 100:.2f}% | AUROC {metrics['auroc']:.4f} | "
-          f"오탐률 {metrics['false_alarm_rate'] * 100:.1f}% | 탐지율 {metrics['detection_rate'] * 100:.1f}%")
-    for attack, m in metrics["per_attack"].items():
-        warn = "  ← < 0.5 (fake의 오차가 더 작음)" if m["auroc"] < 0.5 else ""
-        print(f"  {attack} ({m['num_spoof']:5d}개) | AUROC {m['auroc']:.4f}{warn}")
+        print(f"\n{EVAL_DATA} {variant} ({len(scores)}개) | EER {metrics['eer'] * 100:.2f}% | AUROC {metrics['auroc']:.4f} | "
+              f"오탐률 {metrics['false_alarm_rate'] * 100:.1f}% | 탐지율 {metrics['detection_rate'] * 100:.1f}%")
+        print("  공격별 AUROC: " + " ".join(f"{a[1:]}:{m['auroc']:.2f}" for a, m in metrics["per_attack"].items()))
 
     # ----- 시험지 -----
     score_test_samples(model, mean, std, noises, calibration, os.path.join(EVAL_DIR_RDM, "test_samples.csv"))
