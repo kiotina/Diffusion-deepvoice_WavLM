@@ -1,38 +1,38 @@
 # ===============================
 # preprocess.py
-# 음성 파일을 디퓨전(U-Net)에 넣을 그림(특징)으로 바꿔서 저장한다.
-# 특징의 종류는 config.py의 FEATURES로 고른다. 여러 개면 채널로 쌓는다. → 모양 (채널 수, 256칸, 프레임 수)
+# 음성 파일 하나 → 앞뒤 무음 자름·크기 맞춤 → (학습 real은 증강본도) → XLS-R 22층 프레임 특징 → 프레임 평균
+# = 파일 벡터 하나(1024)로 바꿔서 저장한다. 이 벡터가 디퓨전(train.py)의 입력이다.
+# XLS-R은 학습하지 않고 숫자로 바꾸는 일만 한다.
 #
-# 만드는 파일 (outputs/<RUN_NAME>/preprocess 폴더)
-#   feature_stats.pt     : train real로 계산한 채널·주파수 칸별 평균·표준편차
-#   train_features.pt    : train real 파일마다 전체 길이의 정규화된 특징 (학습 때 무작위로 2초씩 자른다)
-#   val_features.pt      : dev real을 겹치지 않는 2초 조각으로 자른 정규화된 특징 (검증용)
-#   feature_example.png  : 확인용 그림 (채널마다 한 장)
+# 만드는 파일 (outputs/rdm_features_xlsr_l22 폴더, 데이터·증강마다 하나. 이미 있으면 다시 만들지 않는다)
+#   <데이터>_clean.npz   : 원본 그대로             (예: 2019_train_clean.npz, libri_dev_clean.npz)
+#   <데이터>_aug.npz     : 파일마다 증강본 하나     (학습 real, AUGMENT일 때) 방 환경 또는 배속
+#   <EVAL_DATA>_room.npz : eval에 방 환경을 입힌 것 (방에서 녹음한 소리에서도 버티는지 평가)
+#   npz 안: vectors (파일 수, 1024), file_id, label, attack_id, speaker_id
 #
-# 이 파일의 함수(load_audio, file_to_feature, cut_segments 등)는 evaluate.py에서도 그대로 가져다 쓴다.
-# → 학습과 평가가 항상 똑같은 전처리를 거친다.
+# 증강·방 환경은 파일 ID로 난수를 정한다. → 언제 돌려도 같은 파일에 같은 증강이 입혀진다.
+# load_audio, file_vector는 evaluate.py(시험지)와 웹(explain.py)에서도 그대로 쓴다. → 학습과 판정이 똑같은 벡터를 본다.
 # ===============================
 
 import os  # 파일 경로를 다룬다.
 import subprocess  # ffmpeg 프로그램을 실행한다. (m4a 같은 압축 음성을 읽을 때)
+import zlib  # 파일 ID → 난수 시작값 (crc32: 같은 글자면 늘 같은 숫자)
 
 import imageio_ffmpeg  # venv 안에 설치된 ffmpeg 실행 파일의 위치를 알려 준다.
-import librosa  # 음성 파일을 읽고 STFT를 계산한다.
-import matplotlib  # 그림을 저장한다.
-matplotlib.use("Agg")  # 창을 띄우지 않고 파일로만 저장한다.
-import matplotlib.pyplot as plt  # 그림을 그린다.
+import librosa  # 음성 파일을 읽고, 무음을 자르고, 배속을 바꾼다.
 import numpy as np  # 숫자 배열을 계산한다.
-import torch  # 결과를 PyTorch 텐서로 저장한다.
+import torch  # XLS-R을 GPU에서 실행한다.
 from scipy.signal import fftconvolve  # 방 울림 입히기 (긴 소리도 빠르게 합성곱)
+from transformers import AutoFeatureExtractor, AutoModel  # Hugging Face에서 XLS-R을 불러온다.
 
 from config import *  # config.py의 모든 설정값을 가져온다.
 
 
 # ===============================
-# 1. 라벨(프로토콜) 읽기
+# 1. 파일 목록 (라벨 파일 또는 폴더)
 # ===============================
 
-def read_protocol(data_name):  # data_name: config.py의 DATASETS 이름 (예: "2019_train", "2021_eval")
+def read_protocol(data_name):  # data_name: config.py의 DATASETS 이름 (예: "2019_train", "5_eval")
 
     dataset = DATASETS[data_name]  # 라벨 파일, 음성 폴더, 칸 번호
     columns = dataset["columns"]  # 예: {"file_id": 1, "label": 4, ...}
@@ -61,43 +61,59 @@ def read_protocol(data_name):  # data_name: config.py의 DATASETS 이름 (예: "
     return items  # 파일 정보 목록을 돌려준다.
 
 
-def read_folder(data_name):  # 라벨 파일 없이 폴더 안의 wav를 모두 real로 읽는다. (한국어 데이터용) read_protocol과 같은 모양으로 돌려준다.
+def read_folder(data_name):  # 라벨 파일 없이 폴더 안의 음성을 모두 real로 읽는다. (LibriSpeech) read_protocol과 같은 모양으로 돌려준다.
 
-    dataset = DATASETS[data_name]  # 음성 폴더, 이 데이터에 넣을 화자 목록
+    dataset = DATASETS[data_name]  # 음성 폴더, 이 데이터에 넣을 폴더 이름 목록
     items = []
 
     for folder, sub_folders, files in os.walk(dataset["audio_dir"]):  # 음성 폴더 아래의 모든 폴더를 하나씩 본다.
         sub_folders.sort()  # 폴더를 이름순으로 돌아서, 언제 실행해도 파일 순서가 같게 한다.
-        speaker_id = os.path.basename(folder)  # 폴더 이름을 화자 ID로 쓴다. (한국어: 화자 폴더, LibriSpeech: 화자 안의 챕터 폴더)
-        if not any(key in speaker_id for key in dataset["speakers"]):  # 이 데이터의 화자가 아니면 건너뛴다. (train 화자가 dev에 섞이지 않게)
+        speaker_id = os.path.basename(folder)  # 폴더 이름을 화자 ID로 쓴다. (LibriSpeech: 화자 안의 챕터 폴더)
+        if not any(key in speaker_id for key in dataset["speakers"]):  # 이 데이터의 폴더가 아니면 건너뛴다.
             continue
         for name in sorted(files):  # 파일 이름순으로
-            if name.lower().endswith((".wav", ".flac")):  # 한국어는 wav, LibriSpeech는 flac
+            if name.lower().endswith((".wav", ".flac")):
                 items.append({"path": os.path.join(folder, name), "speaker_id": speaker_id,
                               "file_id": os.path.splitext(name)[0], "attack_id": "-", "label": "bonafide"})  # 모두 진짜 사람 음성
 
-    if len(items) == 0:  # 하나도 못 찾았으면 폴더 경로나 화자 이름이 잘못된 것이다.
-        raise ValueError(f"{data_name}: wav를 하나도 찾지 못했다. config.py의 audio_dir와 speakers를 확인할 것")
-    print(f"[{data_name}] 화자 {len({it['speaker_id'] for it in items})}명, 파일 {len(items)}개")
+    if len(items) == 0:  # 하나도 못 찾았으면 폴더 경로가 잘못된 것이다.
+        raise ValueError(f"{data_name}: 음성을 하나도 찾지 못했다. config.py의 audio_dir와 speakers를 확인할 것")
+    print(f"[{data_name}] 폴더 {len({it['speaker_id'] for it in items})}개, 파일 {len(items)}개")
 
     return items
 
 
 def select_bonafide(data_name):  # 해당 데이터에서 real(bonafide) 파일만 고른다. (real-only)
 
-    if "speakers" in DATASETS[data_name]:  # 라벨 파일이 없는 폴더형 데이터 (한국어)
-        items = read_folder(data_name)
-    else:  # ASVspoof: 라벨 파일에서 bonafide만
-        items = [item for item in read_protocol(data_name) if item["label"] == "bonafide"]
+    if "speakers" in DATASETS[data_name]:  # 라벨 파일이 없는 폴더형 데이터 (LibriSpeech)
+        return read_folder(data_name)
 
-    if FILE_LIMIT is not None:  # 개발용으로 개수를 줄인 경우
-        items = items[:FILE_LIMIT]  # 앞에서부터 FILE_LIMIT개만 사용한다.
+    return [item for item in read_protocol(data_name) if item["label"] == "bonafide"]  # ASVspoof: 라벨 파일에서 bonafide만
+
+
+def select_eval_items():  # eval 파일 목록 (real + fake). EVAL_LIMIT가 있으면 무작위로 그 개수만 고른다.
+
+    items = read_protocol(EVAL_DATA)  # bona fide + spoof 전체
+
+    if EVAL_LIMIT is not None:
+        generator = torch.Generator().manual_seed(SEED)  # 언제 돌려도 같은 파일들이 뽑히도록 고정 (지금까지의 8,000개 표본과 같다)
+        picked = torch.randperm(len(items), generator=generator)[:EVAL_LIMIT]  # 무작위 순서에서 앞의 EVAL_LIMIT개
+        items = [items[i] for i in sorted(picked.tolist())]  # 원래 순서대로 정렬
+
+    return items
+
+
+def select_extra_eval(name):  # EXTRA_EVAL 데이터: 라벨 파일 중 실제로 내려받아 둔, 코덱 없는 파일만
+
+    have = set(os.listdir(DATASETS[name]["audio_dir"]))  # 폴더에 있는 파일 이름 (일부만 내려받았으므로)
+    items = [it for it in read_protocol(name) if it["codec"] == "-" and os.path.basename(it["path"]) in have]
+    print(f"[{name}] 코덱 없는 파일 {len(items)}개 (real {sum(it['label'] == 'bonafide' for it in items)})")
 
     return items
 
 
 # ===============================
-# 2. 음성 읽기 (무음 파일 거르기 + 무음 자르기 + 크기 맞추기)
+# 2. 음성 읽기 (무음 파일 거르기 + 앞뒤 무음 자르기 + 크기 맞추기)
 # ===============================
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()  # venv 안의 ffmpeg 실행 파일 경로
@@ -135,7 +151,7 @@ def normalize_peak(wave):  # 가장 큰 진폭이 1.0이 되도록 전체에 같
     return wave / float(np.abs(wave).max())  # load_audio에서 무음 파일을 먼저 걸러 내므로 0으로 나눌 일은 없다.
 
 
-def load_audio(path):  # 음성 파일 하나를 읽는다. 학습·검증·평가·시험지 모두 이 함수를 거친다.
+def load_audio(path):  # 음성 파일 하나를 읽는다. 학습·검증·평가·시험지·웹 모두 이 함수를 거친다.
 
     if path.lower().endswith((".flac", ".wav")):  # ASVspoof(flac) 등 압축 없는 형식
         wave, _ = librosa.load(path, sr=SAMPLE_RATE, mono=True)  # 16kHz 모노로 읽는다. (이미 16kHz면 그대로)
@@ -148,13 +164,12 @@ def load_audio(path):  # 음성 파일 하나를 읽는다. 학습·검증·평�
 
     wave, _ = trim_silence(wave)  # 1) 앞뒤 무음을 잘라 낸다. (무음 길이가 real/fake 단서가 되지 않도록)
     wave = normalize_peak(wave)  # 2) 소리 크기만 맞춘다. (ASVspoof는 이미 1.0이라 그대로)
-    # 파일별 스펙트로그램 정규화 같은 "음색을 바꾸는" 정규화는 하지 않는다. 합성 흔적을 지울 수 있어서.
 
     return wave.astype(np.float32)  # 32비트 실수로 돌려준다.
 
 
 # ===============================
-# 2-1. 증강: 방 환경, 배속 (load_audio를 거친 소리에 입힌다)
+# 3. 증강: 방 환경, 배속 (load_audio를 거친 소리에 입힌다)
 # ===============================
 
 def pink_noise(length, rng):  # 핑크 노이즈: 저음이 크고 고음으로 갈수록 약해지는 잡음 (방·마이크의 바닥 잡음과 비슷)
@@ -205,239 +220,114 @@ def augment(wave, rng):  # 증강본 하나: 방 환경 또는 배속(0.9, 1.1, 
     return change_speed(wave, speed), f"speed{speed}"
 
 
-# ===============================
-# 3. 음성 → 특징 (FEATURES를 채널로 쌓는다)
-# ===============================
+def file_rng(file_id, variant):  # 파일·증강 종류마다 고정된 난수 (언제 돌려도 같은 증강)
 
-def spec_channel(stft):  # log 스펙트로그램: 주파수마다 소리의 세기
-
-    power = np.abs(stft) ** 2  # 크기의 제곱(파워)
-    return np.log(power + LOG_EPS)  # 값의 차이가 너무 크지 않도록 log로 압축한다.
-
-
-def phase_channel(stft):  # 위상 변화 편차: 주파수마다 "다음 프레임에서 위상이 예상만큼 돌았는가"
-
-    phase = np.angle(stft)  # 위상 (-π ~ π). 위상 그 자체는 프레임마다 마구 바뀌어 보여서 그대로는 쓸모가 없다.
-    advance = np.diff(phase, axis=1, prepend=phase[:, :1])  # 프레임 사이에 위상이 돈 양. 첫 프레임은 앞이 없어서 0
-    # 주파수 k칸의 순수한 소리는 한 프레임(HOP_LENGTH 샘플) 동안 위상이 정확히 2π·k·HOP/N_FFT만큼 돈다.
-    expected = 2 * np.pi * np.arange(stft.shape[0])[:, None] * HOP_LENGTH / N_FFT  # (257, 1): 칸마다 예상 회전량
-    deviation = np.angle(np.exp(1j * (advance - expected)))  # (실제 − 예상)을 -π ~ π로 감는다. (2π 차이는 같은 각도라서)
-    deviation[:, 0] = 0.0  # 첫 프레임은 비교할 앞 프레임이 없다.
-    # 편차가 0 근처 = 그 칸의 주파수가 칸 중심과 같고 안정적으로 이어진다. 편차가 크거나 들쭉날쭉 = 소리가 매끄럽게 이어지지 않는다.
-    # 주의: 소리가 거의 없는 칸(고요한 고음 등)의 위상은 의미 없는 잡음이라 편차도 무작위로 나온다.
-
-    return deviation
-
-
-def residual_channel(stft):  # 잔차 스펙트로그램: log 스펙트로그램 − 매끈한 포락선(입 모양)
-
-    log_power = spec_channel(stft)  # (257, 프레임 수)
-    cepstrum = np.fft.irfft(log_power, axis=0)  # 켑스트럼: log 스펙트럼을 한 번 더 푸리에 변환 → "스펙트럼이 얼마나 빨리 출렁이는지"별로 나눈다. (512, 프레임 수)
-    cepstrum[CEPSTRUM_LIFTER:-CEPSTRUM_LIFTER + 1] = 0.0  # 빠른 출렁임(배음 = 목소리 높이)을 지우고 느린 출렁임(포먼트)만 남긴다. (양쪽이 대칭이라 앞뒤 모두 남긴다)
-    envelope = np.fft.rfft(cepstrum, axis=0).real  # 다시 log 스펙트럼으로 → 매끈한 포락선 (257, 프레임 수)
-
-    return log_power - envelope  # 포락선을 빼면 음원의 미세 구조(배음, 잡음 성분)만 남는다.
-
-
-def delta_channel(stft):  # 시간 변화량: 이웃 프레임과의 log 스펙트로그램 차이
-
-    log_power = spec_channel(stft)  # (257, 프레임 수)
-    return np.diff(log_power, axis=1, prepend=log_power[:, :1])  # 지금 프레임 − 앞 프레임. 첫 프레임은 0
-
-
-CHANNEL_FUNCTIONS = {"spec": spec_channel, "phase": phase_channel, "residual": residual_channel, "delta": delta_channel}  # 특징 이름 → 만드는 함수
-
-
-def wave_to_feature(wave):  # waveform → 특징 (채널 수, N_BINS, 프레임 수)
-
-    stft = librosa.stft(  # 프레임마다 주파수 성분(복소수 = 세기 + 위상)을 계산한다. (257, 프레임 수)
-        y=wave,
-        n_fft=N_FFT,
-        win_length=WIN_LENGTH,
-        hop_length=HOP_LENGTH,
-    )
-    channels = [CHANNEL_FUNCTIONS[name](stft)[:N_BINS] for name in FEATURES]  # 특징마다 257칸으로 계산한 뒤 맨 위 한 칸(8000Hz)을 버려 (256, 프레임 수)
-    return np.stack(channels).astype(np.float32)  # (채널 수, 256, 프레임 수)
-
-
-def normalize_feature(feature, stats):  # train 통계로 정규화한다. (채널·칸마다 평균 0, 표준편차 1 근처)
-
-    mean = stats["mean"][:, :, None]  # (채널 수, 256, 1)
-    std = stats["std"][:, :, None]  # (채널 수, 256, 1)
-
-    return (feature - mean) / std  # 모든 파일에 같은 통계를 쓴다. (파일별 정규화는 하지 않는다)
-
-
-def file_to_feature(path, stats):  # 파일 하나 → 정규화된 특징 (채널 수, 256, 프레임 수)
-
-    return normalize_feature(wave_to_feature(load_audio(path)), stats)
+    return np.random.default_rng(zlib.crc32(f"{file_id}_{variant}".encode()))
 
 
 # ===============================
-# 4. 2초 조각으로 자르기
+# 4. XLS-R: 음성 → 파일 벡터
 # ===============================
 
-def pad_to_segment(piece):  # SEGMENT_FRAMES보다 짧은 조각의 오른쪽을 채운다. 반환: (조각, mask)
+def load_xlsr():  # 사전학습 XLS-R과 입력 정리 도구를 불러온다. (처음 실행 때 약 1.2GB를 내려받고, 그 뒤로는 내 컴퓨터에서 읽는다)
 
-    num_frames = piece.shape[-1]  # 실제 프레임 수
-    missing = SEGMENT_FRAMES - num_frames  # 부족한 프레임 수
+    extractor = AutoFeatureExtractor.from_pretrained(XLSR_MODEL)  # waveform을 모델 입력 형태로 바꾸는 규칙 (정규화 여부 등)
+    model = AutoModel.from_pretrained(XLSR_MODEL).to(DEVICE).eval()  # eval(): dropout을 끄고 늘 같은 출력을 내게 한다.
 
-    mask = np.ones(SEGMENT_FRAMES, dtype=np.float32)  # 1 = 진짜 소리, 0 = 채운 칸
-    if missing > 0:  # 부족하면
-        piece = np.pad(piece, ((0, 0), (0, 0), (0, missing)), constant_values=0.0)  # 시간 방향 오른쪽만 정규화된 값 0(평균)으로 채운다.
-        mask[num_frames:] = 0.0  # 채운 칸은 mask=0 → loss와 점수에서 빠진다.
-
-    return piece, mask  # (채널 수, 256, 126), (126,)
+    return extractor, model
 
 
-def cut_segments(feature, hop_frames):  # 정규화된 특징을 2초 조각들로 자른다. 반환: [(조각, mask, 시작 프레임), ...]
+def frame_features(wave, extractor, model):  # load_audio를 거친 waveform → XLSR_LAYER층 프레임 특징 (프레임 수, 1024) torch
 
-    segments = []
-    total_frames = feature.shape[-1]  # 전체 프레임 수
+    if extractor.do_normalize:  # XLS-R은 사전학습 때 파일마다 평균 0, 표준편차 1로 맞춘 소리를 봤다. 똑같이 맞춰 넣는다.
+        wave = (wave - wave.mean()) / np.sqrt(wave.var() + 1e-7)
 
-    for start in range(0, total_frames, hop_frames):  # hop_frames 간격으로 시작 위치를 옮긴다.
-        end = start + SEGMENT_FRAMES  # 조각의 끝 위치
-        piece_len = min(end, total_frames) - start  # 실제로 남은 길이
+    x = torch.from_numpy(wave.astype(np.float32))[None].to(DEVICE)  # (1, 샘플 수): 배치 1개
+    with torch.no_grad():  # 학습하지 않으므로 gradient를 계산하지 않는다. (메모리 절약)
+        out = model(x, output_hidden_states=True)  # 모든 층의 출력을 받는다.
 
-        if piece_len < MIN_SEGMENT_FRAMES:  # 1초보다 짧게 남았으면
-            break  # 버리고 끝낸다.
+    # hidden_states: 0번 = Transformer에 들어가기 직전 값(CNN → 1024로 넓히기 → 위치 정보 더하기), 1~24번 = 각 Transformer 층의 출력
+    return out.hidden_states[XLSR_LAYER][0]  # (프레임 수, 1024): 22층 출력. 20ms마다 벡터 하나
 
-        piece, mask = pad_to_segment(feature[:, :, start:end])  # 부족하면 채운다.
-        segments.append((piece, mask, start))
 
-        if end >= total_frames:  # 파일 끝까지 다 잘랐으면
-            break
+def pool(frames):  # 프레임 특징 (프레임 수, 1024) torch → 벡터 하나 (1024,) numpy. 파일 전체에도, 웹 설명용 창에도 같은 방법을 쓴다.
 
-    return segments
+    return frames.mean(dim=0).float().cpu().numpy()  # 차원마다 프레임 평균 = "이 구간 전체의 성질". 시간 축이 사라진다.
+
+
+def file_vector(wave, extractor, model):  # waveform → 파일 벡터 (1024,). 학습·평가·웹이 모두 이 함수를 쓴다.
+
+    return pool(frame_features(wave, extractor, model))
 
 
 # ===============================
-# 5. 정규화 통계 (train real만 사용)
+# 5. 파일 목록 → 벡터 묶음 저장·불러오기
 # ===============================
 
-def compute_stats(features):  # 채널·주파수 칸마다 평균과 표준편차를 구한다.
+def build_split(items, name, variant, extractor, model):  # name: 데이터 이름, variant: "clean", "aug", "room"
 
-    total_sum = np.zeros((N_CHANNELS, N_BINS), dtype=np.float64)  # 칸별 합 (넘치지 않게 float64)
-    total_sq_sum = np.zeros((N_CHANNELS, N_BINS), dtype=np.float64)  # 칸별 제곱합
-    total_count = 0  # 사용한 프레임 수
+    out_path = os.path.join(FEATURE_DIR, f"{name}_{variant}.npz")
+    if os.path.exists(out_path):  # 이미 만들어 두었으면 다시 하지 않는다. (다시 만들려면 파일을 지운다)
+        print(f"[{name}_{variant}] 이미 있음")
+        return
 
-    for feature in features:  # 파일마다 (채널 수, 256, 프레임 수)
-        feature = feature.astype(np.float64)  # 합을 정확하게 내려고 float64로
-        total_sum += feature.sum(axis=2)  # 시간 방향으로 더한다.
-        total_sq_sum += (feature ** 2).sum(axis=2)
-        total_count += feature.shape[2]
-
-    mean = total_sum / total_count  # 평균
-    std = np.sqrt(total_sq_sum / total_count - mean ** 2)  # 표준편차 = √(제곱의 평균 − 평균의 제곱)
-    std = np.maximum(std, 1e-5)  # 0으로 나누지 않도록 아주 작은 값은 막는다.
-
-    return {"mean": mean.astype(np.float32), "std": std.astype(np.float32)}  # 각각 (채널 수, 256)
-
-
-def load_stats():  # 저장한 통계를 불러온다. (evaluate.py에서 쓴다)
-
-    stats = torch.load(os.path.join(PREPROCESS_DIR, "feature_stats.pt"))
-    return {"mean": stats["mean"].numpy(), "std": stats["std"].numpy()}  # 위 함수들이 numpy를 쓰므로 바꿔 준다.
-
-
-# ===============================
-# 6. 분할별 처리
-# ===============================
-
-def build_train():  # train real → 통계 + 파일별 전체 길이 특징
-
-    items = select_bonafide(TRAIN_DATA)
-    print(f"[train] real 파일 {len(items)}개 처리 시작")
-
-    features, file_ids = [], []  # 정규화 전 특징, 파일 ID
-    for i, item in enumerate(items):  # 파일마다
-        features.append(wave_to_feature(load_audio(item["path"])))  # (채널 수, 256, 프레임 수)
-        file_ids.append(item["file_id"])
-        if (i + 1) % 500 == 0:  # 500개마다 진행 상황
-            print(f"  {i + 1}/{len(items)}")
-
-    stats = compute_stats(features)  # train real로만 통계를 계산한다.
-    torch.save({"mean": torch.from_numpy(stats["mean"]), "std": torch.from_numpy(stats["std"])},
-               os.path.join(PREPROCESS_DIR, "feature_stats.pt"))
-
-    normalized = [torch.from_numpy(normalize_feature(f, stats)) for f in features]  # 정규화한 뒤 텐서로
-    torch.save({"features": normalized, "file_ids": file_ids},  # 파일마다 길이가 달라서 목록(list)으로 저장한다.
-               os.path.join(PREPROCESS_DIR, "train_features.pt"))
-
-    total_frames = sum(f.shape[-1] for f in normalized)
-    print(f"[train] 저장 완료: 파일 {len(normalized)}개, 전체 {total_frames}프레임 (약 {total_frames * HOP_LENGTH / SAMPLE_RATE / 60:.1f}분)")
-    for c, name in enumerate(FEATURES):  # 채널마다 통계 범위를 확인한다.
-        print(f"  {name} 통계: 평균 {stats['mean'][c].min():.2f} ~ {stats['mean'][c].max():.2f}, 표준편차 {stats['std'][c].min():.2f} ~ {stats['std'][c].max():.2f}")
-
-    return stats, normalized[0]  # 확인용 그림에 쓸 첫 파일도 돌려준다.
-
-
-def build_val(stats):  # dev real → 겹치지 않는 고정 2초 조각
-
-    items = select_bonafide(DEV_DATA)
-    print(f"[dev] real 파일 {len(items)}개 처리 시작")
-
-    pieces, masks, file_ids = [], [], []  # 조각, mask, 조각의 원본 파일 ID
-    skipped = 0  # 1초보다 짧아서 조각이 하나도 안 나온 파일 수
-
+    vectors, kinds = [], []  # 파일 벡터, 증강 종류 (확인용)
     for i, item in enumerate(items):
-        segments = cut_segments(file_to_feature(item["path"], stats), hop_frames=SEGMENT_FRAMES)  # 겹치지 않게 2초씩
+        wave = load_audio(item["path"])  # 16kHz 모노 → 무음 파일이면 오류 → 앞뒤 무음 자르기 → 최대 진폭 1.0
+        if variant == "aug":  # 방 환경 또는 배속 중 하나
+            wave, kind = augment(wave, file_rng(item["file_id"], variant))
+            kinds.append(kind)
+        elif variant == "room":  # 평가용 방 환경
+            wave = add_room(wave, file_rng(item["file_id"], variant))
+        vectors.append(file_vector(wave, extractor, model))
+        if (i + 1) % 1000 == 0:  # 진행 상황
+            print(f"  [{name}_{variant}] {i + 1}/{len(items)}")
 
-        if len(segments) == 0:
-            skipped += 1
-            continue
-
-        for piece, mask, _ in segments:
-            pieces.append(piece)
-            masks.append(mask)
-            file_ids.append(item["file_id"])
-
-        if (i + 1) % 500 == 0:
-            print(f"  {i + 1}/{len(items)}")
-
-    pieces = torch.from_numpy(np.stack(pieces))  # (조각 수, 채널 수, 256, 126)
-    masks = torch.from_numpy(np.stack(masks))[:, None, None, :]  # (조각 수, 1, 1, 126): 채널·주파수 방향으로 늘려 쓴다.
-
-    torch.save({"features": pieces, "masks": masks, "file_ids": file_ids}, os.path.join(PREPROCESS_DIR, "val_features.pt"))
-    print(f"[dev] 저장 완료: 조각 {pieces.shape[0]}개, 건너뛴 파일 {skipped}개")
-    print(f"  특징 크기 {tuple(pieces.shape)}, mask 크기 {tuple(masks.shape)}")
-    for c, name in enumerate(FEATURES):  # train 통계로 정규화했으므로 dev도 평균 0, 표준편차 1 근처여야 한다. 크게 다르면 전처리가 어긋난 것이다.
-        channel = pieces[:, c]
-        print(f"  {name}: 값 범위 {channel.min().item():.2f} ~ {channel.max().item():.2f}, 평균 {channel.mean().item():.3f}, 표준편차 {channel.std().item():.3f}")
+    vectors = np.stack(vectors).astype(np.float32)  # (파일 수, 1024)
+    np.savez(out_path, vectors=vectors,  # 벡터와 함께 파일 정보를 같은 순서로 저장한다.
+             file_id=[it["file_id"] for it in items], label=[it["label"] for it in items],
+             attack_id=[it["attack_id"] for it in items], speaker_id=[it["speaker_id"] for it in items])
+    print(f"[{name}_{variant}] 저장: {vectors.shape}, 값 범위 {vectors.min():.2f} ~ {vectors.max():.2f}"
+          + (f", 증강 {dict(zip(*np.unique(kinds, return_counts=True)))}" if kinds else ""))
 
 
-def save_example(feature, out_path):  # 확인용 그림을 저장한다. (채널마다 한 장씩 위아래로)
+def load_split(name, variant="clean"):  # 저장한 벡터 묶음 하나를 불러온다.
 
-    fig, axes = plt.subplots(N_CHANNELS, 1, figsize=(10, 3.5 * N_CHANNELS), squeeze=False)
-    for c, name in enumerate(FEATURES):
-        ax = axes[c, 0]
-        image = ax.imshow(feature[c].numpy(), origin="lower", aspect="auto", cmap="magma")  # 아래쪽이 낮은 주파수
-        ax.set_ylabel("bin (31.25Hz)")
-        ax.set_title(f"normalized {name} (train example)")
-        fig.colorbar(image, ax=ax)
-    axes[-1, 0].set_xlabel("frame (16ms)")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=120)
-    plt.close(fig)
+    data = np.load(os.path.join(FEATURE_DIR, f"{name}_{variant}.npz"))
+    return {key: data[key] for key in data.files}  # vectors, file_id, label, attack_id, speaker_id
+
+
+def load_many(names, variants=("clean",)):  # 여러 데이터·증강을 이어 붙여 불러온다. source: 각 파일이 어느 묶음에서 왔는지
+
+    parts = []
+    for name in names:
+        for variant in variants:
+            part = load_split(name, variant)
+            part["source"] = np.full(len(part["file_id"]), f"{name}_{variant}")  # 예: "libri_train_aug"
+            parts.append(part)
+
+    return {key: np.concatenate([p[key] for p in parts]) for key in parts[0]}  # 같은 열끼리 이어 붙인다.
 
 
 # ===============================
-# 7. 실행
+# 6. 실행
 # ===============================
 
-if __name__ == "__main__":  # python src/preprocess.py로 실행했을 때만 아래가 동작한다.
+if __name__ == "__main__":
 
-    os.makedirs(PREPROCESS_DIR, exist_ok=True)  # 결과 폴더를 만든다.
+    os.makedirs(FEATURE_DIR, exist_ok=True)
+    extractor, model = load_xlsr()
+    print(f"XLS-R: {XLSR_MODEL}, {XLSR_LAYER}층, 장치 {DEVICE}")
 
-    print("설정 확인")
-    print(f"  실험 이름: {RUN_NAME}, 학습: {TRAIN_DATA}, 검증: {DEV_DATA}")
-    print(f"  특징: {FEATURES} → 입력 크기 ({N_CHANNELS}, {N_BINS}, {SEGMENT_FRAMES})")
-    print(f"  앞뒤 무음 자르기 기준: {SILENCE_DB_THRESHOLD}dB, 파일 개수 제한: {FILE_LIMIT}")
-
-    stats, example = build_train()
-    build_val(stats)
-
-    example_path = os.path.join(PREPROCESS_DIR, "feature_example.png")
-    save_example(example, example_path)
-    print(f"확인용 그림 저장: {example_path}")
-    print("전처리 끝")
+    for name in TRAIN_DATA:  # 학습 real: 원본 (+ 증강본)
+        items = select_bonafide(name)
+        build_split(items, name, "clean", extractor, model)
+        if AUGMENT:
+            build_split(items, name, "aug", extractor, model)
+    for name in DEV_DATA:  # dev real: 원본 그대로
+        build_split(select_bonafide(name), name, "clean", extractor, model)
+    eval_items = select_eval_items()  # eval 8,000개 (real + fake)
+    build_split(eval_items, EVAL_DATA, "clean", extractor, model)
+    for name in EXTRA_EVAL:  # 최신 공격 확인용 (ASVspoof 5)
+        build_split(select_extra_eval(name), name, "clean", extractor, model)
+    build_split(eval_items, EVAL_DATA, "room", extractor, model)  # 같은 파일에 방 환경을 입힌 것 (가장 오래 걸려서 마지막에)

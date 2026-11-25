@@ -2,7 +2,7 @@
 # explain.py
 # 웹 데모용: 음성 하나를 RDM(XLS-R 파일 벡터 위의 디퓨전)으로 판정하고, 판정 근거(XAI)를 만든다.
 #
-# 판정: rdm_evaluate.py와 똑같은 계산이다.
+# 판정: evaluate.py와 똑같은 계산이다.
 #   음성 → 앞뒤 무음 자름 → 최대 진폭 1.0 → XLS-R 22층 프레임 → 파일 평균 벡터 → 표준화
 #   → t = 50, 100, 200마다 고정 노이즈 16개를 섞고 RDM이 맞힌 오차 → dev real 기준 z → 평균 = 점수 → 임계값과 비교
 #
@@ -15,8 +15,8 @@
 #   python src/explain.py              dev real로 창 기준값을 만든다. (best.pt가 바뀔 때마다 한 번, 약 2분)
 #   python src/explain.py 음성파일경로    파일 하나를 분석해 요약을 출력한다. (웹 없이 확인용)
 #
-# 읽는 파일: outputs/<RDM_RUN_NAME>/checkpoints/best.pt, evaluation_<EVAL_DATA>/calibration.json (rdm_evaluate.py)
-# 만드는 파일: outputs/<RDM_RUN_NAME>/explain/reference.json (창 기준값, dev real 파일 점수 분포)
+# 읽는 파일: outputs/<RUN_NAME>/checkpoints/best.pt, evaluation_<EVAL_DATA>/calibration.json (evaluate.py)
+# 만드는 파일: outputs/<RUN_NAME>/explain/reference.json (창 기준값, dev real 파일 점수 분포)
 # ===============================
 
 import json  # 기준값 읽고 쓰기
@@ -29,12 +29,11 @@ import numpy as np  # 계산
 import torch  # 모델 실행
 
 from config import *  # config.py의 모든 설정값
-from preprocess import load_audio, normalize_peak, select_bonafide, trim_silence  # 음성 읽기 (학습과 똑같이)
-from rdm_evaluate import EVAL_DIR_RDM, file_scores, load_rdm, make_fixed_noises, measure_errors  # 점수 계산 (평가와 똑같이)
-from rdm_features import frame_features, load_many, load_xlsr, pool  # XLS-R 특징
-from rdm_train import standardize  # 표준화
+from evaluate import file_scores, load_rdm, make_fixed_noises, measure_errors  # 점수 계산 (평가와 똑같이)
+from preprocess import frame_features, load_audio, load_many, load_xlsr, normalize_peak, pool, select_bonafide, trim_silence  # 음성 읽기·XLS-R 특징 (학습과 똑같이)
+from train import standardize  # 표준화
 
-EXPLAIN_DIR = os.path.join(RDM_DIR, "explain")
+EXPLAIN_DIR = os.path.join(RUN_DIR, "explain")
 REFERENCE_PATH = os.path.join(EXPLAIN_DIR, "reference.json")
 WINDOW_FRAMES = int(round(EXPLAIN_WINDOW_SEC / XLSR_FRAME_SEC))  # 2초 = 100프레임
 HOP_FRAMES = int(round(EXPLAIN_HOP_SEC / XLSR_FRAME_SEC))  # 1초 = 50프레임
@@ -79,14 +78,14 @@ def build_reference():
     model, mean, std = load_rdm()
     noises = make_fixed_noises()
     extractor, xlsr = load_xlsr()
-    calibration = json.load(open(os.path.join(EVAL_DIR_RDM, "calibration.json"), encoding="utf-8"))  # 파일 점수 기준 (rdm_evaluate.py)
+    calibration = json.load(open(os.path.join(EVAL_DIR, "calibration.json"), encoding="utf-8"))  # 파일 점수 기준 (evaluate.py)
 
     # ----- dev real 파일 점수 분포 (화면의 분포 그림, 백분위) -----
-    dev = load_many(RDM_DEV_DATA)
+    dev = load_many(DEV_DATA)
     dev_scores = file_scores(measure_errors(model, standardize(dev["vectors"], mean, std), noises), calibration)
 
     # ----- dev real 일부의 창 오차 → 창 기준값 -----
-    items = [it for name in RDM_DEV_DATA for it in select_bonafide(name)]
+    items = [it for name in DEV_DATA for it in select_bonafide(name)]
     rng = np.random.default_rng(SEED)
     picked = rng.choice(len(items), size=min(EXPLAIN_REF_FILES, len(items)), replace=False)  # 언어·데이터가 섞이도록 무작위
     window_errors, file_index = [], []
@@ -108,7 +107,7 @@ def build_reference():
     reference.update({
         "dev_scores": dev_scores.tolist(),
         "hist": {"counts": counts.tolist(), "edges": edges.tolist()},
-        "meta": {"run_name": RDM_RUN_NAME, "checkpoint_step": int(torch.load(os.path.join(RDM_DIR, "checkpoints", "best.pt"), weights_only=False)["step"]),
+        "meta": {"run_name": RUN_NAME, "checkpoint_step": int(torch.load(os.path.join(RUN_DIR, "checkpoints", "best.pt"), weights_only=False)["step"]),
                  "threshold": calibration["threshold"], "num_dev_files": len(dev_scores), "num_window_files": len(picked),
                  "num_windows": len(window_errors), "created": time.strftime("%Y-%m-%d %H:%M")},
     })
@@ -198,15 +197,15 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
         if not os.path.exists(REFERENCE_PATH):
             raise FileNotFoundError(f"기준값 파일이 없습니다: {REFERENCE_PATH}\n먼저 python src/explain.py 를 실행하세요.")
         self.reference = json.load(open(REFERENCE_PATH, encoding="utf-8"))
-        self.calibration = json.load(open(os.path.join(EVAL_DIR_RDM, "calibration.json"), encoding="utf-8"))
+        self.calibration = json.load(open(os.path.join(EVAL_DIR, "calibration.json"), encoding="utf-8"))
         self.model, self.mean, self.std = load_rdm()
-        self.checkpoint = torch.load(os.path.join(RDM_DIR, "checkpoints", "best.pt"), weights_only=False)
+        self.checkpoint = torch.load(os.path.join(RUN_DIR, "checkpoints", "best.pt"), weights_only=False)
         self.noises = make_fixed_noises()
         self.extractor, self.xlsr = load_xlsr()
         self.dev_scores = np.array(self.reference["dev_scores"])
 
         meta = self.reference["meta"]  # 기준값을 만든 뒤 모델이나 임계값이 바뀌었으면 점수가 조용히 틀어진다. 그래서 멈춘다.
-        if meta["run_name"] != RDM_RUN_NAME or meta["checkpoint_step"] != self.checkpoint["step"] or abs(meta["threshold"] - self.calibration["threshold"]) > 1e-9:
+        if meta["run_name"] != RUN_NAME or meta["checkpoint_step"] != self.checkpoint["step"] or abs(meta["threshold"] - self.calibration["threshold"]) > 1e-9:
             raise RuntimeError(f"기준값({meta['run_name']}, step {meta['checkpoint_step']})이 지금 모델과 다릅니다. python src/explain.py 를 다시 실행하세요.")
 
         self.mel_hz = librosa.mel_frequencies(n_mels=DISPLAY_N_MELS + 2, fmin=0.0, fmax=SAMPLE_RATE / 2)[1:-1]  # 화면용 Mel 칸의 중심 주파수
@@ -214,13 +213,13 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
     def model_card(self):  # 화면과 보고서에 적을 모델 정보
 
         return {
-            "run_name": RDM_RUN_NAME,
+            "run_name": RUN_NAME,
             "feature_type": "xlsr",
             "feature": f"XLS-R 300M {XLSR_LAYER}층 특징의 파일 평균 벡터({XLSR_DIM}차원)",
-            "network": f"MLP 디퓨전(DDPM, 잔차 블록 {RDM_BLOCKS}개)",
+            "network": f"MLP 디퓨전(DDPM, 잔차 블록 {BLOCKS}개)",
             "checkpoint_epoch": f"step {self.checkpoint['step']}",  # 화면이 쓰는 이름을 그대로 둔다. (걸음 수)
-            "train_data": " + ".join(RDM_TRAIN_DATA) + (" (방 환경·배속 증강)" if RDM_AUGMENT else ""),
-            "dev_data": " + ".join(RDM_DEV_DATA),
+            "train_data": " + ".join(TRAIN_DATA) + (" (방 환경·배속 증강)" if AUGMENT else ""),
+            "dev_data": " + ".join(DEV_DATA),
             "score_timesteps": SCORE_TIMESTEPS,
             "threshold_percentile": THRESHOLD_PERCENTILE,
             "decision_key": "score_rdm",
@@ -245,15 +244,15 @@ class Explainer:  # 서버를 켤 때 한 번 만들고, 요청마다 analyze_wa
         trim_offset = start / SAMPLE_RATE  # 웹에서 재생 위치를 맞출 때 쓴다.
         truncated = len(wave) > MAX_AUDIO_SEC * SAMPLE_RATE
         wave = wave[:int(MAX_AUDIO_SEC * SAMPLE_RATE)]  # 너무 길면 앞부분만 (GPU 메모리, 응답 시간)
-        if len(wave) < MIN_SEGMENT_SEC * SAMPLE_RATE:
-            raise ValueError(f"말소리가 너무 짧습니다. 앞뒤 무음을 빼고 {MIN_SEGMENT_SEC:g}초 이상이어야 합니다.")
+        if len(wave) < MIN_AUDIO_SEC * SAMPLE_RATE:
+            raise ValueError(f"말소리가 너무 짧습니다. 앞뒤 무음을 빼고 {MIN_AUDIO_SEC:g}초 이상이어야 합니다.")
 
         quality, notes = inspect_audio(wave, source_info, original_sec, truncated)
         quality["duration"] = len(wave) / SAMPLE_RATE
         notes.append({"level": "info", "text": f"학습 때처럼 앞뒤 무음을 잘라 내고 소리 크기를 맞춰 {quality['duration']:.1f}초를 분석했습니다. (원래 {original_sec:.1f}초)"})
         wave = normalize_peak(wave).astype(np.float32)
 
-        # ----- 판정: 파일 전체 벡터 (rdm_evaluate.py와 같은 계산) -----
+        # ----- 판정: 파일 전체 벡터 (evaluate.py와 같은 계산) -----
         frames = frame_features(wave, self.extractor, self.xlsr)  # (T, 1024)
         file_x = standardize(pool(frames)[None], self.mean, self.std)  # (1, 1024)
         file_errors = measure_errors(self.model, file_x, self.noises)  # (1, 3)

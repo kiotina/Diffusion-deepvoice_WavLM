@@ -1,34 +1,32 @@
 # ===============================
 # train.py
-# 진짜 음성(bona fide)의 특징만으로 DDPM(U-Net)을 학습한다.
-# U-Net은 "노이즈가 섞인 특징"을 보고 "섞인 노이즈 ε"를 맞히도록 배운다.
+# 학습 real 파일 벡터(XLS-R 22층 프레임 평균, 1024)만으로 작은 MLP 디퓨전(DDPM)을 학습한다.
+# MLP는 "노이즈가 섞인 벡터 x_t"와 "단계 t"를 보고 "섞인 노이즈 ε"를 맞히도록 배운다.
+#   입력이 그림(2D)이 아니라 숫자 1024개가 한 줄로 놓인 벡터라서 "주변 칸"을 보는 Conv가 필요 없다. Linear로 충분하다.
+#   폭은 처음부터 끝까지 1024로 같다. (U-Net처럼 줄였다 늘리지 않는다. 노이즈 맞히기 자체가 베끼기를 막는다)
 #
-# 읽는 파일 (outputs/<RUN_NAME>/preprocess 폴더, preprocess.py가 만든 것)
-#   train_features.pt    : train real 파일마다 전체 길이의 정규화된 특징 (채널 수, 256, 프레임 수)
-#   val_features.pt      : dev real 고정 2초 조각
-#
+# 읽는 파일: outputs/rdm_features_xlsr_l22/ 의 TRAIN_DATA·DEV_DATA 벡터 (preprocess.py가 만든 것)
 # 만드는 파일 (outputs/<RUN_NAME>/checkpoints 폴더)
-#   best.pt              : val loss가 가장 낮았던 모델
-#   last.pt              : 마지막 epoch의 모델
-#   epoch_XXX.pt         : SAVE_EVERY epoch마다 따로 저장한 모델 (나중 분석용)
-#   history.csv          : epoch마다 train/val loss와 t 구간별 val loss
-#   loss_curve.png       : loss 곡선 그림
+#   best.pt         : dev real 손실이 가장 낮았던 모델 + 표준화 통계(train real 평균·표준편차)
+#   history.csv     : VAL_EVERY걸음마다 train/dev 손실
+#   loss_curve.png  : 손실 곡선
+#
+# 이 파일의 forward_diffusion, standardize, RDM은 evaluate.py와 웹(explain.py)에서도 그대로 쓴다.
 # ===============================
 
 import csv  # history.csv를 쓴다.
 import math  # timestep embedding에서 log를 계산한다.
 import os  # 파일 경로를 다룬다.
-import time  # epoch마다 걸린 시간을 잰다.
+import time  # 걸린 시간을 잰다.
 
 import matplotlib  # 그림을 저장한다.
 matplotlib.use("Agg")  # 창을 띄우지 않고 파일로만 저장한다.
-import matplotlib.pyplot as plt  # loss 곡선을 그린다.
+import matplotlib.pyplot as plt  # 손실 곡선을 그린다.
 import torch  # 텐서 계산과 학습
-import torch.nn as nn  # 신경망 층(Conv, GroupNorm 등)
-import torch.nn.functional as F  # 패딩 같은 함수
-from torch.utils.data import DataLoader, Dataset, TensorDataset  # 데이터를 배치로 묶어 준다.
+import torch.nn as nn  # 신경망 층(Linear, LayerNorm 등)
 
 from config import *  # config.py의 모든 설정값을 가져온다.
+from preprocess import load_many  # 저장한 파일 벡터를 불러온다.
 
 
 # ===============================
@@ -46,26 +44,25 @@ sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)  # √(1−ᾱ_t) : x_t
 # 2. Forward diffusion (원본에 노이즈 섞기)
 # ===============================
 
-def select_random_timesteps(batch_size, generator=None):  # 조각마다 t를 0 ~ TIMESTEPS-1 중 하나씩 무작위로 뽑는다.
+def select_random_timesteps(batch_size, generator=None):  # 벡터마다 t를 0 ~ TIMESTEPS-1 중 하나씩 무작위로 뽑는다.
 
     t = torch.randint(0, TIMESTEPS, (batch_size,), generator=generator)  # generator를 주면 그 난수로 뽑는다. (검증용)
 
     return t.to(DEVICE)  # (B,) 정수
 
 
-def forward_diffusion(x0, t, noise=None):  # x_t = √ᾱ_t · x₀ + √(1−ᾱ_t) · ε
+def forward_diffusion(x0, t, noise=None):  # x_t = √ᾱ_t · x₀ + √(1−ᾱ_t) · ε     x0: (B, 1024), t: (B,)
 
     if noise is None:  # 노이즈를 밖에서 주지 않았으면 (학습할 때)
         noise = torch.randn_like(x0)  # 표준정규분포 노이즈를 새로 만든다.
     # 검증·평가 때는 고정 노이즈를 밖에서 넣어 매번 같은 문제를 풀게 한다.
 
-    shape = (-1,) + (1,) * (x0.dim() - 1)  # 그림 (B, C, H, W)이면 (-1, 1, 1, 1), 벡터 (B, D)이면 (-1, 1) (RDM도 이 함수를 쓴다)
-    sqrt_ab = sqrt_alpha_bars[t].view(shape)  # (B,) → (B, 1, 1, 1): 조각마다 다른 t의 값을 그림 전체에 곱하도록
-    sqrt_1m_ab = sqrt_one_minus_alpha_bars[t].view(shape)  # (B, 1, 1, 1)
+    sqrt_ab = sqrt_alpha_bars[t][:, None]  # (B,) → (B, 1): 벡터마다 다른 t의 값을 1024칸 전체에 곱하도록
+    sqrt_1m_ab = sqrt_one_minus_alpha_bars[t][:, None]  # (B, 1)
 
-    x_t = sqrt_ab * x0 + sqrt_1m_ab * noise  # 노이즈가 섞인 특징
+    x_t = sqrt_ab * x0 + sqrt_1m_ab * noise  # 노이즈가 섞인 벡터
 
-    return x_t, noise  # U-Net 입력과 정답 노이즈
+    return x_t, noise  # MLP 입력과 정답 노이즈
 
 
 # ===============================
@@ -83,212 +80,110 @@ def get_timestep_embedding(t, dim):  # t를 sin·cos 값 dim개로 바꾼다. (T
 
 
 # ===============================
-# 4. U-Net
+# 4. 표준화 (train real 통계)
 # ===============================
 
-class ResBlock(nn.Module):  # conv → GroupNorm → SiLU → (t 더함) → conv, 그리고 입력을 더하는 skip
+def compute_stats(vectors):  # 차원마다 평균·표준편차 (train real만으로)
 
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)  # 크기는 그대로, 채널만 in_ch → out_ch
-        self.norm = nn.GroupNorm(GROUP_NORM_GROUPS, out_ch)  # 값의 크기를 일정하게 맞춰 학습을 안정시킨다.
-        self.act = nn.SiLU()  # 활성화 함수
-        self.time_proj = nn.Linear(TIME_EMBEDDING_DIM, out_ch)  # t 벡터를 이 블록의 채널 수에 맞게 바꾼다.
-        self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)  # 한 번 더 conv
+    mean = vectors.mean(axis=0)  # (1024,)
+    std = vectors.std(axis=0) + 1e-6  # (1024,): 0으로 나누지 않도록 아주 작은 값을 더한다.
 
-        if in_ch != out_ch:  # 채널 수가 바뀌면 입력을 그대로 더할 수 없으므로
-            self.skip = nn.Conv2d(in_ch, out_ch, kernel_size=1)  # 1×1 conv로 채널 수만 맞춘다.
-        else:
-            self.skip = nn.Identity()  # 채널 수가 같으면 그대로 더한다.
-
-    def forward(self, x, t_emb):  # x: (B, in_ch, H, W), t_emb: (B, TIME_EMBEDDING_DIM)
-
-        h = self.conv1(x)  # (B, out_ch, H, W)
-        h = self.act(self.norm(h))  # 정규화 → 활성화
-        h = h + self.time_proj(t_emb)[:, :, None, None]  # t 정보를 채널마다 더한다. (B, out_ch) → (B, out_ch, 1, 1)
-        h = self.conv2(h)  # (B, out_ch, H, W)
-
-        return h + self.skip(x)  # skip: 입력을 더해 정보가 잘 흐르게 한다.
+    return mean, std
 
 
-class UNet(nn.Module):  # 입력 (B, 채널 수, 256, 126) → 예측 노이즈 (B, 채널 수, 256, 126)
+def standardize(vectors, mean, std):  # 차원마다 평균 0, 표준편차 1 근처로 맞춘다. (22층 값은 표준편차 약 16 → 디퓨전 노이즈 ε(표준편차 1)와 크기를 맞추려고)
+
+    return (vectors - mean) / std
+
+
+# ===============================
+# 5. MLP (노이즈를 맞히는 선수)
+# ===============================
+
+class MLPBlock(nn.Module):  # LayerNorm → Linear → (t 더함) → SiLU → Dropout → Linear, 그리고 입력을 더하는 skip
 
     def __init__(self):
         super().__init__()
-        ch1, ch2, ch3 = BASE_CHANNELS, BASE_CHANNELS * 2, BASE_CHANNELS * 4  # 32, 64, 128
+        self.norm = nn.LayerNorm(HIDDEN)  # 값의 크기를 일정하게 맞춰 학습을 안정시킨다.
+        self.fc1 = nn.Linear(HIDDEN, HIDDEN)  # 1024 → 1024
+        self.time_proj = nn.Linear(TIME_EMBEDDING_DIM, HIDDEN)  # t 벡터(128)를 이 블록의 크기(1024)에 맞게 바꾼다.
+        self.act = nn.SiLU()  # 활성화 함수
+        self.drop = nn.Dropout(DROPOUT)  # 학습 때만 일부 값을 무작위로 0으로 만든다. (외우지 않도록)
+        self.fc2 = nn.Linear(HIDDEN, HIDDEN)  # 한 번 더 Linear
 
+    def forward(self, h, t_emb):  # h: (B, HIDDEN), t_emb: (B, TIME_EMBEDDING_DIM)
+
+        z = self.fc1(self.norm(h))  # 정규화 → Linear
+        z = self.act(z + self.time_proj(t_emb))  # t 정보를 더하고 활성화 (지금 노이즈가 얼마나 섞였는지 알려 준다)
+        z = self.fc2(self.drop(z))  # Dropout → Linear
+
+        return h + z  # skip: 입력을 더해 정보가 잘 흐르게 한다.
+
+
+class RDM(nn.Module):  # 노이즈 섞인 벡터 x_t (B, 1024)와 t (B,) → 예측 노이즈 (B, 1024)
+
+    def __init__(self):
+        super().__init__()
         self.time_mlp = nn.Sequential(  # sin·cos 벡터를 학습 가능한 층에 한 번 통과시킨다.
             nn.Linear(TIME_EMBEDDING_DIM, TIME_EMBEDDING_DIM),
             nn.SiLU(),
             nn.Linear(TIME_EMBEDDING_DIM, TIME_EMBEDDING_DIM),
         )
+        self.inp = nn.Linear(XLSR_DIM, HIDDEN)  # 입력(1024) → 안쪽 공간(1024)
+        self.blocks = nn.ModuleList([MLPBlock() for _ in range(BLOCKS)])  # 블록 3개
+        self.out = nn.Sequential(  # 안쪽 공간 → 노이즈 예측 (1024)
+            nn.LayerNorm(HIDDEN),
+            nn.SiLU(),
+            nn.Linear(HIDDEN, XLSR_DIM),
+        )
 
-        self.conv_in = nn.Conv2d(N_CHANNELS, ch1, kernel_size=3, padding=1)  # 특징 채널(spec, phase …) → 32채널
+    def forward(self, x, t):
 
-        # Encoder: 크기를 반으로 줄이면서 채널을 늘린다.
-        self.enc1 = ResBlock(ch1, ch1)  # 256×128, 32채널
-        self.down1 = nn.Conv2d(ch1, ch1, kernel_size=3, stride=2, padding=1)  # 256×128 → 128×64
-        self.enc2 = ResBlock(ch1, ch2)  # 128×64, 64채널
-        self.down2 = nn.Conv2d(ch2, ch2, kernel_size=3, stride=2, padding=1)  # 128×64 → 64×32
+        t_emb = self.time_mlp(get_timestep_embedding(t, TIME_EMBEDDING_DIM))  # (B,) → (B, 128)
+        h = self.inp(x)  # (B, 1024)
+        for block in self.blocks:
+            h = block(h, t_emb)  # 블록마다 t 정보를 다시 넣는다.
 
-        # Bottleneck: 가장 작은 크기에서 전체 모양을 본다.
-        self.mid = ResBlock(ch2, ch3)  # 64×32, 128채널
-
-        # Decoder: 크기를 다시 키우고, Encoder 출력을 이어 붙인다(skip connection).
-        self.up2 = nn.Upsample(scale_factor=2, mode="nearest")  # 64×32 → 128×64
-        self.dec2 = ResBlock(ch3 + ch2, ch2)  # (128 + enc2의 64)채널 → 64채널
-        self.up1 = nn.Upsample(scale_factor=2, mode="nearest")  # 128×64 → 256×128
-        self.dec1 = ResBlock(ch2 + ch1, ch1)  # (64 + enc1의 32)채널 → 32채널
-
-        self.conv_out = nn.Conv2d(ch1, N_CHANNELS, kernel_size=3, padding=1)  # 32채널 → 특징 채널마다 노이즈 하나씩
-
-    def forward(self, x, t):  # x: (B, 채널 수, 256, 126), t: (B,)
-
-        num_frames = x.shape[-1]  # 원래 프레임 수(126)를 기억해 둔다.
-        x = F.pad(x, (0, UNET_FRAMES - num_frames))  # 시간 방향 오른쪽만 0으로 채워 (B, 채널 수, 256, 128)
-
-        t_emb = self.time_mlp(get_timestep_embedding(t, TIME_EMBEDDING_DIM))  # (B, 128)
-
-        h = self.conv_in(x)  # (B, 32, 256, 128)
-        h1 = self.enc1(h, t_emb)  # (B, 32, 256, 128) ← skip으로 쓸 출력
-        h2 = self.enc2(self.down1(h1), t_emb)  # (B, 64, 128, 64) ← skip으로 쓸 출력
-        h = self.mid(self.down2(h2), t_emb)  # (B, 128, 64, 32)
-
-        h = self.dec2(torch.cat([self.up2(h), h2], dim=1), t_emb)  # (B, 128+64, 128, 64) → (B, 64, 128, 64)
-        h = self.dec1(torch.cat([self.up1(h), h1], dim=1), t_emb)  # (B, 64+32, 256, 128) → (B, 32, 256, 128)
-        out = self.conv_out(h)  # (B, 채널 수, 256, 128)
-
-        return out[..., :num_frames]  # 채웠던 오른쪽을 잘라 다시 (B, 채널 수, 256, 126)
+        return self.out(h)  # (B, 1024): 예측한 ε
 
 
 # ===============================
-# 5. 학습 데이터: random crop Dataset
+# 6. 검증 (dev real, 고정 t·노이즈)
 # ===============================
 
-class CropDataset(Dataset):  # 파일 전체 특징에서 매번 다른 위치의 2초(126프레임)를 잘라 준다.
+def make_val_problem(num):  # dev real 벡터마다 t 하나와 노이즈 하나를 고정한다. (매번 같은 문제를 풀게 해서 손실을 비교할 수 있게)
 
-    def __init__(self, features):
-        self.features = features  # 파일마다 (채널 수, 256, 프레임 수)인 텐서 목록
+    generator = torch.Generator().manual_seed(VAL_SEED)  # 학습 난수와 섞지 않는 전용 난수
+    t = select_random_timesteps(num, generator=generator)  # (dev 수,)
+    noise = torch.randn((num, XLSR_DIM), generator=generator).to(DEVICE)  # (dev 수, 1024)
 
-    def __len__(self):  # 1 epoch = 파일마다 한 번씩
-        return len(self.features)
+    return t, noise
 
-    def __getitem__(self, i):  # i번째 파일에서 2초 조각 하나를 잘라 준다.
 
-        feature = self.features[i]  # (채널 수, 256, 프레임 수)
-        num_frames = feature.shape[-1]  # 이 파일의 프레임 수
-        mask = torch.ones(SEGMENT_FRAMES)  # 1 = 진짜 소리, 0 = 채운 칸
+def validate(model, x_dev, val_t, val_noise):  # dev real 평균 MSE
 
-        if num_frames >= SEGMENT_FRAMES:  # 2초 이상이면
-            start = torch.randint(0, num_frames - SEGMENT_FRAMES + 1, (1,)).item()  # 시작 위치를 무작위로 정한다.
-            feature = feature[:, :, start:start + SEGMENT_FRAMES]  # (채널 수, 256, 126)
-        else:  # 2초보다 짧으면 (무음을 자른 뒤 짧아진 파일)
-            feature = F.pad(feature, (0, SEGMENT_FRAMES - num_frames))  # 오른쪽을 0(정규화된 평균값)으로 채운다.
-            mask[num_frames:] = 0.0  # 채운 칸은 mask=0 → loss에서 빠진다.
+    model.eval()  # Dropout을 끈다.
+    with torch.no_grad():
+        x_t, _ = forward_diffusion(x_dev, val_t, val_noise)  # 고정 노이즈를 섞는다.
+        loss = ((model(x_t, val_t) - val_noise) ** 2).mean()  # (예측 − 정답)²의 평균
+    model.train()  # 다시 학습 모드로
 
-        return feature, mask[None, None]  # (채널 수, 256, 126), (1, 1, 126)
+    return loss.item()
 
 
 # ===============================
-# 6. Loss: masked MSE
+# 7. 저장
 # ===============================
 
-def masked_mse(pred, target, mask):  # 조각마다 mask=1인 칸에서만 (예측 − 정답)²의 평균을 낸다.
+def save_loss_curve(history, out_path):  # train/dev 손실 곡선
 
-    mask = mask.expand_as(pred)  # (B, 1, 1, 126) → (B, 채널 수, 256, 126): 같은 프레임의 모든 채널·주파수 칸에 같은 mask를 쓴다.
-    squared_error = (pred - target) ** 2 * mask  # mask=0인 칸(패딩)의 오차는 0으로 지운다.
-
-    error_sum = squared_error.sum(dim=(1, 2, 3))  # (B,): 조각마다 오차의 합
-    count = mask.sum(dim=(1, 2, 3))  # (B,): 조각마다 mask=1인 칸 수
-
-    return error_sum / count.clamp(min=LOSS_EPS)  # (B,): 조각마다 평균 오차 (칸 수가 0이면 아주 작은 값으로 나눈다)
-
-
-# ===============================
-# 7. 학습 한 epoch
-# ===============================
-
-def train_one_epoch(model, loader, optimizer):
-
-    model.train()  # 학습 모드
-    total_loss, total_count = 0.0, 0  # epoch 평균 loss를 구하기 위한 합과 개수
-
-    for x0, mask in loader:  # 배치마다
-        x0, mask = x0.to(DEVICE), mask.to(DEVICE)  # (B, 채널 수, 256, 126), (B, 1, 1, 126)
-
-        t = select_random_timesteps(x0.shape[0])  # 조각마다 t를 무작위로 하나씩
-        x_t, noise = forward_diffusion(x0, t)  # 노이즈를 섞는다.
-        pred_noise = model(x_t, t)  # U-Net이 섞인 노이즈를 예측한다.
-        loss = masked_mse(pred_noise, noise, mask).mean()  # 배치 평균 loss
-
-        optimizer.zero_grad()  # 이전 배치의 gradient를 지운다.
-        loss.backward()  # gradient 계산
-        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)  # gradient가 너무 커지지 않게 자른다.
-        optimizer.step()  # 가중치 수정
-
-        total_loss += loss.item() * x0.shape[0]  # 배치 크기만큼 가중해서 더한다. (마지막 배치는 작을 수 있어서)
-        total_count += x0.shape[0]
-
-    return total_loss / total_count  # epoch 평균 train loss
-
-
-# ===============================
-# 8. 검증 (dev real 고정 조각, 고정 t·노이즈)
-# ===============================
-
-@torch.no_grad()  # 검증에서는 gradient를 계산하지 않는다. (메모리, 속도)
-def validate(model, loader):
-
-    model.eval()  # 평가 모드
-    generator = torch.Generator().manual_seed(VAL_SEED)  # 검증 전용 난수. 매번 같은 시작값 → 매 epoch 같은 t와 노이즈
-    all_losses, all_t = [], []  # 조각마다 loss와 t를 모은다.
-
-    for x0, mask in loader:  # 배치마다 (순서가 고정되어 있다)
-        x0, mask = x0.to(DEVICE), mask.to(DEVICE)
-
-        t = select_random_timesteps(x0.shape[0], generator=generator)  # 검증 전용 난수로 t를 뽑는다.
-        noise = torch.randn(x0.shape, generator=generator).to(DEVICE)  # 검증 전용 난수로 노이즈를 만든다.
-        x_t, _ = forward_diffusion(x0, t, noise)  # 밖에서 만든 고정 노이즈를 넣는다.
-        pred_noise = model(x_t, t)
-
-        all_losses.append(masked_mse(pred_noise, noise, mask).cpu())  # (B,)
-        all_t.append(t.cpu())  # (B,)
-
-    all_losses = torch.cat(all_losses)  # (조각 수,)
-    all_t = torch.cat(all_t)  # (조각 수,)
-
-    bin_losses = {}  # t 구간별 val loss
-    for start in range(0, TIMESTEPS, VAL_T_BIN_SIZE):  # 0, 200, 400, 600, 800
-        end = start + VAL_T_BIN_SIZE
-        in_bin = (all_t >= start) & (all_t < end)  # 이 구간에 속한 조각
-        bin_losses[f"val_t{start:04d}_{end:04d}"] = all_losses[in_bin].mean().item()  # 구간 평균 loss
-
-    return all_losses.mean().item(), bin_losses  # 전체 val loss, 구간별 val loss
-
-
-# ===============================
-# 9. 저장 (체크포인트, 그림)
-# ===============================
-
-def save_checkpoint(path, model, epoch, val_loss):  # 모델 가중치와 그때의 기록을 저장한다.
-
-    torch.save({
-        "epoch": epoch,  # 몇 번째 epoch의 모델인지
-        "val_loss": val_loss,  # 그때의 val loss
-        "features": FEATURES,  # 어떤 특징으로 학습했는지 (평가 때 설정이 다르면 알아챌 수 있게)
-        "model": model.state_dict(),  # 모델 가중치 (평가에는 이것만 필요하다)
-    }, path)
-
-
-def save_loss_curve(history, out_path):  # train/val loss 곡선을 그린다.
-
-    epochs = [row["epoch"] for row in history]
+    steps = [row["step"] for row in history]
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(epochs, [row["train_loss"] for row in history], label="train")
-    ax.plot(epochs, [row["val_loss"] for row in history], label="val (dev real)")
-    ax.set_xlabel("epoch")
-    ax.set_ylabel("masked MSE")
-    ax.set_title(f"{RUN_NAME}: {FEATURES}")
+    ax.plot(steps, [row["train_loss"] for row in history], label="train")
+    ax.plot(steps, [row["val_loss"] for row in history], label="val (dev real)")
+    ax.set_xlabel("step")
+    ax.set_ylabel("MSE")
+    ax.set_title(f"{RUN_NAME}: XLS-R layer {XLSR_LAYER} file vectors")
     ax.legend()
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
@@ -296,93 +191,64 @@ def save_loss_curve(history, out_path):  # train/val loss 곡선을 그린다.
 
 
 # ===============================
-# 10. 실행
+# 8. 실행
 # ===============================
 
-if __name__ == "__main__":  # python src/train.py로 실행했을 때만 아래가 동작한다.
+if __name__ == "__main__":
 
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)  # 결과 폴더를 만든다.
-    print(f"장치: {DEVICE}, 실험 이름: {RUN_NAME}, 특징: {FEATURES}")
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-    # ----- 데이터 불러오기 -----
-    train_data = torch.load(os.path.join(PREPROCESS_DIR, "train_features.pt"))  # 파일마다 전체 특징
-    val_data = torch.load(os.path.join(PREPROCESS_DIR, "val_features.pt"))  # dev 고정 조각
+    # ----- 데이터: train real로 표준화 통계를 정하고 train·dev에 똑같이 적용 -----
+    variants = ("clean", "aug") if AUGMENT else ("clean",)  # 증강을 쓰면 원본과 증강본을 함께
+    train_vectors = load_many(TRAIN_DATA, variants)["vectors"]  # (학습 real 수, 1024)
+    dev_vectors = load_many(DEV_DATA)["vectors"]  # (dev real 수, 1024), 원본 그대로
+    mean, std = compute_stats(train_vectors)
+    x_train = torch.tensor(standardize(train_vectors, mean, std), device=DEVICE)  # 벡터가 작아서 전부 GPU에 올려 둔다.
+    x_dev = torch.tensor(standardize(dev_vectors, mean, std), device=DEVICE)
+    print(f"학습 {TRAIN_DATA} × {variants}: {tuple(x_train.shape)}, dev {DEV_DATA}: {tuple(x_dev.shape)}")
+    print(f"표준화 뒤 train 값 범위 {x_train.min():.1f} ~ {x_train.max():.1f}")
 
-    train_loader = DataLoader(
-        CropDataset(train_data["features"]),
-        batch_size=BATCH_SIZE,
-        shuffle=True,  # epoch마다 파일 순서를 섞는다.
-        num_workers=NUM_WORKERS,
-    )
-    val_loader = DataLoader(
-        TensorDataset(val_data["features"], val_data["masks"]),
-        batch_size=BATCH_SIZE,
-        shuffle=False,  # 검증은 순서를 고정해야 매번 같은 t·노이즈가 같은 조각에 간다.
-    )
-    print(f"train 파일 {len(train_data['features'])}개, val 조각 {val_data['features'].shape[0]}개")
-
-    # ----- 크기 확인 -----
-    model = UNet().to(DEVICE)
+    # ----- 모델 -----
+    model = RDM().to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
-    num_params = sum(p.numel() for p in model.parameters())  # 학습할 가중치 개수
-    print(f"U-Net 가중치 수: {num_params:,}")
+    print(f"RDM 가중치 {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+    val_t, val_noise = make_val_problem(len(x_dev))
 
-    x0, mask = next(iter(train_loader))  # 배치 하나를 꺼내 본다.
-    print(f"train 배치: 특징 {tuple(x0.shape)}, mask {tuple(mask.shape)}, 값 범위 {x0.min():.2f} ~ {x0.max():.2f}")
-    with torch.no_grad():
-        out = model(x0.to(DEVICE), select_random_timesteps(x0.shape[0]))
-    print(f"U-Net 출력: {tuple(out.shape)} (입력과 같아야 한다)")
+    # ----- 학습: STEPS걸음. 학습 real을 섞어서 앞에서부터 256개씩, 다 쓰면 다시 섞는다 -----
+    history, best_loss, start = [], float("inf"), time.time()
+    order, pos = torch.randperm(len(x_train), device=DEVICE), 0  # 순서와 지금 위치
+    for step in range(1, STEPS + 1):
+        if pos + BATCH_SIZE > len(x_train):  # 한 바퀴(epoch)를 다 돌면 순서를 다시 섞는다.
+            order, pos = torch.randperm(len(x_train), device=DEVICE), 0
+        idx = order[pos:pos + BATCH_SIZE]  # 이번 묶음 256개
+        pos += BATCH_SIZE
 
-    # ----- 점수용 t의 √ᾱ 확인 -----
-    for t_score in SCORE_TIMESTEPS:
-        print(f"t={t_score}: √ᾱ = {sqrt_alpha_bars[t_score].item():.3f} (원본이 남는 비율)")
+        x0 = x_train[idx]  # (B, 1024)
+        t = select_random_timesteps(len(idx))  # 벡터마다 무작위 t
+        x_t, noise = forward_diffusion(x0, t)  # 노이즈를 섞는다.
+        loss = ((model(x_t, t) - noise) ** 2).mean()  # 섞인 노이즈를 얼마나 맞혔나 (MSE)
 
-    # ----- 학습 전 loss 확인 -----
-    init_val_loss, _ = validate(model, val_loader)
-    print(f"학습 전 val loss: {init_val_loss:.4f} (1.0 근처여야 한다)")
+        optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)  # gradient가 갑자기 커지는 것을 막는다.
+        optimizer.step()
 
-    # ----- history.csv 준비 -----
-    bin_names = [f"val_t{s:04d}_{s + VAL_T_BIN_SIZE:04d}" for s in range(0, TIMESTEPS, VAL_T_BIN_SIZE)]
-    columns = ["epoch", "train_loss", "val_loss"] + bin_names + ["seconds"]
-    history_path = os.path.join(CHECKPOINT_DIR, "history.csv")
-    with open(history_path, "w", newline="", encoding="utf-8") as f:  # 새로 시작하므로 헤더부터 쓴다.
-        csv.writer(f).writerow(columns)
+        if step % VAL_EVERY == 0:  # 500걸음마다 dev real 손실
+            val_loss = validate(model, x_dev, val_t, val_noise)
+            history.append({"step": step, "train_loss": loss.item(), "val_loss": val_loss})
+            if val_loss < best_loss:  # 가장 좋았던 모델만 남긴다. (조기 종료와 같은 효과)
+                best_loss = val_loss
+                torch.save({"step": step, "val_loss": val_loss, "layer": XLSR_LAYER,
+                            "train_data": TRAIN_DATA, "augment": AUGMENT,  # 무엇으로 학습했는지
+                            "mean": mean, "std": std,  # 평가·웹에서 똑같이 표준화하려고 함께 저장한다.
+                            "model": model.state_dict()}, os.path.join(CHECKPOINT_DIR, "best.pt"))
+            if step % (VAL_EVERY * 10) == 0:  # 5,000걸음마다 출력
+                print(f"step {step:5d} | train {loss.item():.4f} | dev real {val_loss:.4f} | best {best_loss:.4f} | {time.time() - start:.0f}초")
 
-    # ----- 학습 -----
-    history = []  # 그림을 그리기 위해 epoch마다 기록을 모은다.
-    best_val_loss = float("inf")  # 지금까지 가장 낮은 val loss
-    epochs_without_improve = 0  # val loss가 좋아지지 않은 epoch 수 (early stopping)
-
-    for epoch in range(1, MAX_EPOCHS + 1):
-        start_time = time.time()
-
-        train_loss = train_one_epoch(model, train_loader, optimizer)
-        val_loss, bin_losses = validate(model, val_loader)
-        seconds = time.time() - start_time
-
-        row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, **bin_losses, "seconds": seconds}
-        history.append(row)
-        with open(history_path, "a", newline="", encoding="utf-8") as f:  # epoch마다 바로 적는다. (중간에 멈춰도 남도록)
-            csv.writer(f).writerow([row[c] for c in columns])
-
-        save_checkpoint(os.path.join(CHECKPOINT_DIR, "last.pt"), model, epoch, val_loss)  # 매 epoch 덮어쓴다.
-        if epoch % SAVE_EVERY == 0:  # SAVE_EVERY epoch마다 따로 남긴다.
-            save_checkpoint(os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pt"), model, epoch, val_loss)
-
-        if val_loss < best_val_loss:  # val loss가 좋아졌으면
-            best_val_loss = val_loss
-            epochs_without_improve = 0
-            save_checkpoint(os.path.join(CHECKPOINT_DIR, "best.pt"), model, epoch, val_loss)
-            mark = " ← best"
-        else:  # 좋아지지 않았으면
-            epochs_without_improve += 1
-            mark = ""
-
-        print(f"epoch {epoch:3d} | train {train_loss:.4f} | val {val_loss:.4f} | {seconds:.0f}초{mark}")
-
-        if epochs_without_improve >= PATIENCE:  # PATIENCE번 연속 좋아지지 않으면 멈춘다.
-            print(f"{PATIENCE} epoch 동안 val loss가 좋아지지 않아 학습을 멈춘다.")
-            break
-
+    # ----- 기록 -----
+    with open(os.path.join(CHECKPOINT_DIR, "history.csv"), "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["step", "train_loss", "val_loss"])
+        writer.writeheader()
+        writer.writerows(history)
     save_loss_curve(history, os.path.join(CHECKPOINT_DIR, "loss_curve.png"))
-    print(f"학습 끝. best val loss {best_val_loss:.4f}, 결과 폴더: {CHECKPOINT_DIR}")
+    print(f"끝: best dev real 손실 {best_loss:.4f}, 저장 {CHECKPOINT_DIR}")
