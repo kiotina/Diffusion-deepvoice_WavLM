@@ -223,7 +223,8 @@ SCORE_NOISE_SEEDS = [1729, 2718]  # t마다 사용할 고정 노이즈의 시작
 INFER_HOP_SEC = 1.0  # 평가할 때 2초 창을 1초씩 밀면서 자른다.
 INFER_HOP_FRAMES = int(INFER_HOP_SEC * SAMPLE_RATE) // HOP_LENGTH  # 1초 = 62프레임
 
-THRESHOLD_PERCENTILE = 95  # dev bona fide 파일 점수의 95백분위를 임계값으로 쓴다.
+THRESHOLD_PERCENTILE = 90  # dev bona fide 파일 점수의 90백분위를 임계값으로 쓴다. = real 10%까지는 fake로 의심해도 감수한다.
+# 처음엔 관례대로 95(오탐 5%)였다. "fake를 놓치는 것이 real을 한 번 더 의심하는 것보다 나쁘다"는 사용 목적으로 90으로 바꿨다. (2026-11-25, eval 탐지율을 본 뒤라 발표 때 밝힌다)
 
 
 # ===============================
@@ -250,9 +251,10 @@ RDM_FEATURE_DIR = os.path.join(OUTPUT_DIR, f"rdm_features_xlsr_l{XLSR_LAYER}" + 
 #   시연:  RDM_RUN_NAME = "rdm_xlsr_l22_multi", 아래 값
 #   시연(이전): RDM_RUN_NAME = "rdm_xlsr_l22_multi", LibriSpeech 없이 (2019 EER 14.13%, ASVspoof 5 오탐 61.6%)
 #   + LibriSpeech(평균만): RDM_RUN_NAME = "rdm_xlsr_l22_multi_libri", RDM_POOLING = "mean" (2019 EER 16.75%, ASVspoof 5 17.92%)
-RDM_RUN_NAME = "rdm_xlsr_l22_multi_libri" + ("_meanstd" if RDM_POOLING == "mean_std" else "")  # 결과 폴더 이름 (outputs/<RDM_RUN_NAME>/)
-RDM_TRAIN_DATA = ["2019_train", "ko_train", "kspon_train", "libri_train"]  # 학습할 real (영어 스튜디오 + 한국어 + 영어 오디오북)
-RDM_DEV_DATA = ["2019_dev", "ko_dev", "kspon_dev", "libri_dev"]  # 조기 종료·보정·임계값용 real (학습에 안 쓴 화자들, 깨끗한 그대로)
+#   영어 시연(지금): 한국어를 빼고 영어 스튜디오 + 오디오북 + 증강 (2019 EER 13.01%, 방 환경 23.92%, ASVspoof 5 17.24%)
+RDM_RUN_NAME = "rdm_xlsr_l22_en_libri" + ("_meanstd" if RDM_POOLING == "mean_std" else "")  # 결과 폴더 이름 (outputs/<RDM_RUN_NAME>/)
+RDM_TRAIN_DATA = ["2019_train", "libri_train"]  # 학습할 real (영어 스튜디오 + 영어 오디오북). 한국어(ko_train, kspon_train)는 뺐다
+RDM_DEV_DATA = ["2019_dev", "libri_dev"]  # 조기 종료·보정·임계값용 real (학습에 안 쓴 화자들, 깨끗한 그대로)
 RDM_AUGMENT = True  # True면 학습 real마다 증강본 하나를 더한다. (방 환경 또는 배속 중 무작위 하나)
 RDM_EXTRA_EVAL = ["5_eval"]  # EVAL_DATA 말고 더 평가할 데이터. 내려받아 둔 파일 중 코덱을 거치지 않은 깨끗한 것만 쓴다. (최신 TTS 확인용)
 RDM_DIR = os.path.join(OUTPUT_DIR, RDM_RUN_NAME)
@@ -264,7 +266,7 @@ RDM_BATCH_SIZE = 256  # 벡터는 작아서 한 번에 많이 넣는다.
 RDM_STEPS = 40000  # 학습 걸음 수 (걸음 하나 = 256개 묶음 하나). 데이터 양이 달라도 학습 길이가 같도록 epoch 대신 걸음으로 센다.
 RDM_VAL_EVERY = 500  # 이 걸음마다 dev real 손실을 재고, 가장 낮았던 모델을 남긴다.
 RDM_NOISE_COUNT = 16  # 점수를 낼 때 t마다 고정 노이즈 16개로 시험을 보고 평균한다. (벡터 하나라 싸다)
-# 점수용 t는 SCORE_TIMESTEPS(50/100/200), 임계값은 THRESHOLD_PERCENTILE(95)을 그대로 쓴다.
+# 점수용 t는 SCORE_TIMESTEPS(50/100/200), 임계값은 THRESHOLD_PERCENTILE(90)을 그대로 쓴다.
 
 
 # ===============================
