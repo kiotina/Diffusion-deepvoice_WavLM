@@ -3,13 +3,13 @@
 # 그다음 나머지를 설치한다.
 #   python -m pip install -r requirements.txt
 
-librosa        # 음성 파일 읽기, Mel-spectrogram 계산
-soundfile      # librosa가 FLAC/WAV 파일을 읽을 때 내부에서 사용
+librosa        # 음성 파일 읽기, 앞뒤 무음 자르기, 배속 증강
+soundfile      # librosa가 FLAC/WAV 파일을 읽을 때 내부에서 사용 (0.12.1로 따로 고정 설치)
 numpy          # 숫자 배열 계산
-matplotlib     # 그림 저장 (Mel 예시, loss 곡선, 점수 분포)
+matplotlib     # 그림 저장 (손실 곡선, 점수 분포)
 scikit-learn   # 평가 지표 계산 (EER, AUROC)
-transformers   # 미리 학습된 WavLM 불러오기 (FEATURE_TYPE = "wavlm")
-imageio-ffmpeg # 코덱 증강용 ffmpeg 실행 파일 (venv 안에 설치된다. AUGMENT_CODEC = True)
-scipy          # 코덱 증강의 pstn 흉내에서 대역 통과 필터 (librosa와 함께 설치되지만 직접 쓰므로 적어 둔다)
-fastapi
-uvicorn
+transformers   # 미리 학습된 XLS-R 불러오기
+imageio-ffmpeg # m4a·mp3 같은 압축 음성을 읽는 ffmpeg 실행 파일 (venv 안에 설치된다)
+scipy          # 방 환경 증강의 울림 합성 (librosa와 함께 설치되지만 직접 쓰므로 적어 둔다)
+fastapi        # 웹 서버
+uvicorn        # 웹 서버 실행
