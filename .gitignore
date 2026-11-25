@@ -16,6 +16,9 @@ demo_out/
 # 시연용 음성 샘플 (ASVspoof 데이터는 각자 내려받음)
 test_samples/
 
+# Claude Code 설정 (개인 개발 환경)
+.claude/
+
 # 데이터·모델 파일이 실수로 섞여 들어가는 것 방지
 *.flac
 *.wav
