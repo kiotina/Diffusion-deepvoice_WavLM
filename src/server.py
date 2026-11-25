@@ -166,7 +166,7 @@ async def lifespan(app):
     from explain import Explainer  # 모델·WavLM·torch를 여기서 불러온다.
     explainer = Explainer()  # 기준값이 없거나 맞지 않으면 여기서 멈춘다.
     card = explainer.model_card()
-    print(f"모델: {card['run_name']} · {card['feature']} · epoch {card['checkpoint_epoch']} · 판정 {DECISION_KEY} · 장치 {DEVICE}")
+    print(f"모델: {card['run_name']} · {card['feature']} · {card['network']} · {card['checkpoint_epoch']} · 장치 {DEVICE}")
     print("개인정보: 음성·결과 저장 안 함, 파일 이름 받지 않음, 접속 기록 없음")
     if SERVER_HOST not in ("127.0.0.1", "localhost"):
         print("주의: 외부에서 접속할 수 있게 열었습니다. HTTPS 없이 쓰면 음성이 암호화되지 않은 채 네트워크로 오갑니다.")
