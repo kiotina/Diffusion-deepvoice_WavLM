@@ -41,7 +41,7 @@ def load_xlsr():  # 사전학습 XLS-R과 입력 정리 도구를 불러온다. 
 # 2. 음성 하나 → 파일 벡터
 # ===============================
 
-def file_vector(wave, extractor, model):  # load_audio를 거친 waveform → XLSR_LAYER층 프레임 평균 (1024,)
+def frame_features(wave, extractor, model):  # load_audio를 거친 waveform → XLSR_LAYER층 프레임 특징 (프레임 수, 1024) torch
 
     if extractor.do_normalize:  # XLS-R은 사전학습 때 파일마다 평균 0, 표준편차 1로 맞춘 소리를 봤다. 똑같이 맞춰 넣는다.
         wave = (wave - wave.mean()) / np.sqrt(wave.var() + 1e-7)
@@ -49,14 +49,23 @@ def file_vector(wave, extractor, model):  # load_audio를 거친 waveform → XL
     x = torch.from_numpy(wave.astype(np.float32))[None].to(DEVICE)  # (1, 샘플 수): 배치 1개
     with torch.no_grad():  # 학습하지 않으므로 gradient를 계산하지 않는다. (메모리 절약)
         out = model(x, output_hidden_states=True)  # 모든 층의 출력을 받는다.
-    frames = out.hidden_states[XLSR_LAYER][0]  # (프레임 수, 1024): 22층 출력. 20ms마다 벡터 하나 (0번은 CNN 출력, 1~24번이 Transformer 층)
 
-    mean = frames.mean(dim=0)  # (1024,): 프레임 평균 = "이 파일 전체의 성질"
+    return out.hidden_states[XLSR_LAYER][0]  # (프레임 수, 1024): 22층 출력. 20ms마다 벡터 하나 (0번은 CNN 출력, 1~24번이 Transformer 층)
+
+
+def pool(frames):  # 프레임 특징 (프레임 수, 1024) torch → 벡터 하나 numpy. 파일 전체에도, 웹 설명용 창에도 같은 방법을 쓴다.
+
+    mean = frames.mean(dim=0)  # (1024,): 프레임 평균 = "이 구간 전체의 성질"
     if RDM_POOLING == "mean_std":  # 표준편차도 붙인다 → (2048,)
         std = frames.std(dim=0)  # (1024,): 차원마다 프레임끼리 얼마나 흔들리나 (작을수록 "매끈함")
         return torch.cat([mean, std]).float().cpu().numpy()
 
     return mean.float().cpu().numpy()
+
+
+def file_vector(wave, extractor, model):  # waveform → 파일 벡터 (1024,). 학습·평가·웹이 모두 이 함수를 쓴다.
+
+    return pool(frame_features(wave, extractor, model))
 
 
 def select_extra_eval(name):  # RDM_EXTRA_EVAL 데이터: 라벨 파일 중 실제로 내려받아 둔, 코덱 없는 파일만
