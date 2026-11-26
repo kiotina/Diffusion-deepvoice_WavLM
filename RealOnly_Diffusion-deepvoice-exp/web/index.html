@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>딥보이스 판별 · XAI 보고서</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #ffffff; --ink: #111827; --ink2: #374151; --muted: #6b7280; --faint: #9ca3af;
+    --line: #e5e7eb; --line2: #f0f1f4;
+    --accent: #4338ca; --accent-soft: #eef2ff;
+    --spoof: #dc2626; --spoof-soft: #fef2f2; --real: #15803d; --real-soft: #f0fdf4;
+    --warn: #b45309; --warn-soft: #fffbeb; --low: #2563eb;
+    --radius: 14px; --shadow: 0 1px 2px rgba(16, 24, 40, .05);
+    --font: "Pretendard", system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.6 var(--font); word-break: keep-all; overflow-wrap: anywhere; }  /* 한국어는 어절 단위로 줄바꿈 */
+  button { font: inherit; color: inherit; }
+  .num { font-variant-numeric: tabular-nums; }
+  [hidden] { display: none !important; }
+
+  /* 상단 */
+  .topbar { position: sticky; top: 0; z-index: 20; background: rgba(255, 255, 255, .88); backdrop-filter: saturate(1.4) blur(10px); border-bottom: 1px solid var(--line); }
+  .topbar-in { max-width: 1080px; margin: 0 auto; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -0.01em; }
+  .brand-mark { width: 28px; height: 28px; border-radius: 8px; background: var(--ink); display: grid; place-items: center; }
+  .brand small { display: block; font-weight: 500; color: var(--muted); font-size: 12px; letter-spacing: 0; }
+  .top-actions { display: flex; align-items: center; gap: 10px; }
+  .chip { font-size: 12.5px; padding: 4px 10px; border-radius: 999px; background: var(--line2); color: var(--muted); white-space: nowrap; }
+  .chip.ok { background: var(--real-soft); color: var(--real); }
+  .chip.bad { background: var(--spoof-soft); color: var(--spoof); }
+  .chip.demo { background: var(--warn-soft); color: var(--warn); }
+  .link-btn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font-size: 14px; }
+  .link-btn:hover { text-decoration: underline; }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 64px; }
+  .intro h1 { font-size: 28px; line-height: 1.3; letter-spacing: -0.02em; margin: 0 0 8px; }
+  .intro p { margin: 0 0 24px; color: var(--muted); max-width: 680px; }
+
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 24px; }
+  .stack > * + * { margin-top: 16px; }
+  .section-head { display: flex; align-items: center; gap: 10px; margin: 40px 0 14px; }
+  .section-head h2 { font-size: 18px; margin: 0; letter-spacing: -0.01em; }
+  .section-head .spacer { flex: 1; }
+  .step { width: 24px; height: 24px; border-radius: 50%; background: var(--ink); color: #fff; font-size: 13px; font-weight: 700; display: grid; place-items: center; flex: none; }
+  .card h3 { font-size: 15px; margin: 0; letter-spacing: -0.01em; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .card-head p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
+
+  .btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: #fff; border-radius: 10px; padding: 9px 14px; cursor: pointer; font-size: 14px; font-weight: 500; transition: background .15s, border-color .15s; }
+  .btn:hover { border-color: #cbd0d8; background: #fafafa; }
+  .btn.primary { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .btn.primary:hover { background: #1f2937; }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+  .btn.ghost:hover { background: var(--line2); color: var(--ink); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn svg { width: 16px; height: 16px; flex: none; }
+
+  /* 1. 입력 */
+  .consent { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; background: #fcfcfd; }
+  .consent label { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; color: var(--ink2); cursor: pointer; padding: 4px 0; }
+  .consent input { width: 17px; height: 17px; margin: 2px 0 0; accent-color: var(--ink); flex: none; }
+  .consent b { color: var(--ink); font-weight: 600; }
+  .consent-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; padding-top: 10px; border-top: 1px dashed var(--line); font-size: 13px; color: var(--muted); }
+  .input-row { display: grid; grid-template-columns: 1fr 220px; gap: 14px; }
+  .drop { border: 1.5px dashed #cdd2da; border-radius: 12px; padding: 26px 20px; text-align: center; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 6px; transition: background .15s, border-color .15s; }
+  .drop:hover, .drop:focus-visible, .drop.over { border-color: var(--accent); background: var(--accent-soft); outline: none; }
+  .drop svg { width: 26px; height: 26px; color: var(--muted); }
+  .drop strong { font-size: 15px; }
+  .drop span { font-size: 13px; color: var(--muted); }
+  .rec { border: 1px solid var(--line); border-radius: 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 16px; text-align: center; }
+  .rec small { color: var(--muted); font-size: 12px; }
+  .rec .btn.recording { background: var(--spoof); border-color: var(--spoof); color: #fff; }
+  .locked .drop, .locked .rec { opacity: .45; }
+  .locked .drop { cursor: not-allowed; }
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
+  .pills li { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink2); background: var(--line2); border-radius: 999px; padding: 4px 10px; }
+  .pills svg { width: 13px; height: 13px; color: var(--real); }
+  .status { font-size: 14px; color: var(--muted); min-height: 1.4em; }
+  .status.error { color: var(--spoof); }
+  .status.busy::before { content: ""; display: inline-block; width: 12px; height: 12px; margin-right: 8px; vertical-align: -1px; border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 2. 결과: 판정 */
+  .verdict { display: grid; grid-template-columns: 1fr; gap: 20px; }
+  .verdict-top { display: flex; gap: 18px; align-items: flex-start; }
+  .verdict-badge { flex: none; width: 52px; height: 52px; border-radius: 14px; display: grid; place-items: center; }
+  .verdict-badge svg { width: 26px; height: 26px; }
+  .spoof .verdict-badge { background: var(--spoof-soft); color: var(--spoof); }
+  .bonafide .verdict-badge { background: var(--real-soft); color: var(--real); }
+  .verdict-label { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; }
+  .spoof .verdict-label { color: var(--spoof); }
+  .bonafide .verdict-label { color: var(--real); }
+  .verdict-sub { margin: 4px 0 0; color: var(--ink2); }
+  .verdict-meta { margin-top: 6px; font-size: 13px; color: var(--muted); }
+  .scores { border-top: 1px solid var(--line); }
+  .score-row { display: grid; grid-template-columns: 210px 1fr 150px 64px; gap: 16px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line2); }
+  .score-row:last-child { border-bottom: 0; padding-bottom: 0; }
+  .sr-name b { display: block; font-size: 14px; }
+  .sr-name span { font-size: 12px; color: var(--muted); }
+  .tag { display: inline-block; margin-left: 6px; font-size: 11px; font-style: normal; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 1px 6px; vertical-align: 1px; }
+  .sr-chart { width: 100%; height: 46px; display: block; }
+  .sr-val { text-align: right; }
+  .sr-val b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .sr-val span { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .flag { justify-self: end; font-size: 12px; font-weight: 600; border-radius: 6px; padding: 3px 8px; }
+  .flag.on { color: var(--spoof); background: var(--spoof-soft); }
+  .flag.off { color: var(--real); background: var(--real-soft); }
+
+  /* 근거 1: 시간 */
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; padding: 3px; background: #fafafb; }
+  .seg button { border: 0; background: none; padding: 5px 11px; border-radius: 7px; font-size: 13px; color: var(--muted); cursor: pointer; }
+  .seg button.on { background: #fff; color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, .08); font-weight: 600; }
+  .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink2); cursor: pointer; }
+  .toggle input { accent-color: var(--ink); }
+  .controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  audio { width: 100%; height: 40px; margin-bottom: 12px; }
+  .viewer { position: relative; }
+  #viewer { display: block; width: 100%; cursor: crosshair; }
+  .tooltip { position: absolute; pointer-events: none; background: rgba(17, 24, 39, .94); color: #fff; font-size: 12px; padding: 6px 9px; border-radius: 8px; white-space: nowrap; transform: translate(12px, -110%); display: none; font-variant-numeric: tabular-nums; line-height: 1.5; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12.5px; color: var(--muted); margin-top: 10px; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -2px; }
+
+  /* 근거 2, 3 */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .bar-row { display: grid; grid-template-columns: 92px 1fr 128px; gap: 12px; align-items: center; padding: 8px 0; }
+  .bar-row .name { font-size: 14px; font-weight: 600; }
+  .bar-row .name small { display: block; font-size: 11.5px; font-weight: 400; color: var(--muted); }
+  .track { position: relative; height: 12px; background: var(--line2); border-radius: 6px; }
+  .track.center::after { content: ""; position: absolute; left: 50%; top: -4px; bottom: -4px; width: 1px; background: #b8bec8; }
+  .fill { position: absolute; top: 0; bottom: 0; border-radius: 6px; }
+  .bar-row .val { text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--ink2); }
+  .scale { display: grid; grid-template-columns: 92px 1fr 128px; gap: 12px; font-size: 11px; color: var(--faint); }
+  .scale div { display: flex; justify-content: space-between; }
+  .big-num { font-size: 13px; color: var(--muted); }
+  .big-num b { color: var(--ink); font-size: 15px; font-variant-numeric: tabular-nums; }
+
+  ol.summary { margin: 0; padding-left: 20px; }
+  ol.summary li { margin: 7px 0; color: var(--ink2); }
+  ul.notes { list-style: none; margin: 0; padding: 0; }
+  ul.notes li { display: flex; gap: 10px; padding: 8px 0; font-size: 14px; color: var(--ink2); border-bottom: 1px solid var(--line2); }
+  ul.notes li:last-child { border-bottom: 0; }
+  ul.notes .ico { flex: none; width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; font-size: 12px; font-weight: 700; margin-top: 1px; }
+  ul.notes .warn .ico { background: var(--warn-soft); color: var(--warn); }
+  ul.notes .info .ico { background: var(--accent-soft); color: var(--accent); }
+  ul.notes .ok .ico { background: var(--real-soft); color: var(--real); }
+
+  .record { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12.5px; color: var(--muted); padding: 14px 18px; border: 1px solid var(--line); border-radius: 12px; background: #fcfcfd; }
+  .record b { color: var(--ink2); font-weight: 600; }
+
+  /* 3. 보고서 */
+  .report-card { display: grid; grid-template-columns: 1fr auto; gap: 24px; align-items: end; }
+  .opts { display: flex; flex-direction: column; gap: 8px; }
+  .opts label { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; color: var(--ink2); cursor: pointer; }
+  .opts input { margin-top: 3px; accent-color: var(--ink); }
+  .opts small { display: block; color: var(--muted); font-size: 12px; }
+  .actions { display: flex; flex-direction: column; gap: 8px; min-width: 200px; }
+  .actions .btn { justify-content: center; }
+
+  footer { margin-top: 48px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 20px; }
+
+  /* 개인정보 안내 */
+  dialog { border: 0; border-radius: 16px; padding: 0; width: min(640px, calc(100vw - 32px)); box-shadow: 0 20px 60px rgba(0, 0, 0, .2); color: var(--ink); }
+  dialog::backdrop { background: rgba(17, 24, 39, .45); }
+  .dlg-head { display: flex; justify-content: space-between; align-items: center; padding: 18px 22px; border-bottom: 1px solid var(--line); }
+  .dlg-head h2 { font-size: 17px; margin: 0; }
+  .dlg-body { padding: 8px 22px 22px; max-height: 70vh; overflow: auto; font-size: 14px; color: var(--ink2); }
+  .dlg-body dl { margin: 0; }
+  .dlg-body dt { font-weight: 600; color: var(--ink); margin-top: 16px; }
+  .dlg-body dd { margin: 4px 0 0; }
+  .dlg-body .note { margin-top: 18px; padding: 12px 14px; border-radius: 10px; background: var(--warn-soft); color: #7c4a03; font-size: 13px; }
+
+  /* 보고서 미리보기 */
+  .overlay { position: fixed; inset: 0; z-index: 50; background: #e9ebef; display: flex; flex-direction: column; }
+  .overlay-bar { display: flex; align-items: center; gap: 10px; padding: 12px 20px; background: #fff; border-bottom: 1px solid var(--line); }
+  .overlay-bar .title { font-weight: 600; flex: 1; }
+  .overlay-scroll { flex: 1; overflow: auto; padding: 28px 16px 60px; }
+
+  @media (max-width: 820px) {
+    .input-row, .grid2, .report-card { grid-template-columns: 1fr; }
+    .score-row { grid-template-columns: 1fr 100px; }
+    .sr-chart { grid-column: 1 / -1; grid-row: 2; }
+    .flag { grid-column: 2; }
+    .topbar-in, .wrap { padding-left: 16px; padding-right: 16px; }
+    .chip#model-chip { display: none; }
+  }
+
+  @media print {
+    @page { size: A4; margin: 14mm; }
+    body { background: #fff; }
+    body.printing-report > *:not(#report-overlay) { display: none !important; }
+    body.printing-report #report-overlay { position: static; background: #fff; display: block; }
+    .overlay-bar { display: none !important; }
+    .overlay-scroll { padding: 0; overflow: visible; }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-in">
+    <div class="brand">
+      <div class="brand-mark"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/></svg></div>
+      <div>딥보이스 판별<small>Real-only Diffusion · XAI</small></div>
+    </div>
+    <div class="top-actions">
+      <span id="model-chip" class="chip">서버 확인 중…</span>
+      <button class="link-btn" data-open-privacy>개인정보 처리 안내</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="intro">
+    <h1>음성이 진짜 사람 목소리인지 확인하고,<br>판단 근거를 보고서로 받아 보세요.</h1>
+    <p>진짜 음성만으로 학습한 확산 모델이 이 음성을 얼마나 낯설어하는지 측정합니다. 어느 시간에, 어느 노이즈 단계에서 진짜 음성과 달랐는지 함께 보여 줍니다.</p>
+  </section>
+
+  <!-- 1. 음성 넣기 -->
+  <div class="section-head"><span class="step">1</span><h2>음성 넣기</h2></div>
+  <section class="card stack locked" id="input-card">
+    <div class="consent">
+      <label><input type="checkbox" id="consent-process"><span><b>[필수]</b> 올린 음성을 딥보이스 판별에만 쓰고, 분석이 끝나면 바로 파기하는 데 동의합니다.</span></label>
+      <label><input type="checkbox" id="consent-owner"><span><b>[필수]</b> 내 목소리이거나, 다른 사람의 목소리라면 그 사람에게 동의를 받았습니다.</span></label>
+      <div class="consent-foot"><span>동의하지 않으면 분석할 수 없습니다. 동의는 저장되지 않습니다.</span><button class="link-btn" data-open-privacy>처리 방식 자세히 보기</button></div>
+    </div>
+
+    <div class="input-row">
+      <div id="drop" class="drop" tabindex="0" role="button" aria-disabled="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+        <strong>음성 파일을 끌어다 놓거나 클릭해서 고르세요</strong>
+        <span id="drop-hint">wav · flac · mp3 · m4a · ogg · webm · 최대 20MB · 앞 30초 분석</span>
+        <input type="file" id="file-input" accept="audio/*,.wav,.flac,.mp3,.m4a,.ogg,.webm,.opus,.aac" hidden>
+      </div>
+      <div class="rec">
+        <button id="rec-btn" class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg><span>마이크로 녹음</span></button>
+        <small id="rec-hint">누르면 시작, 다시 누르면 분석</small>
+      </div>
+    </div>
+
+    <ul class="pills">
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg>서버에 저장하지 않음</li>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg>파일 이름은 보내지 않음</li>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg>외부 서비스로 전송 없음</li>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg>결과는 이 탭에만 남음</li>
+    </ul>
+    <div id="status" class="status" role="status"></div>
+  </section>
+
+  <!-- 2. 결과 -->
+  <div id="result" hidden>
+    <div class="section-head">
+      <span class="step">2</span><h2>판별 결과와 근거</h2><span class="spacer"></span>
+      <button id="clear-btn" class="btn ghost"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>결과 지우기</button>
+    </div>
+
+    <div class="stack">
+      <section id="verdict" class="card verdict">
+        <div class="verdict-top">
+          <div class="verdict-badge" id="verdict-icon"></div>
+          <div>
+            <div id="verdict-label" class="verdict-label"></div>
+            <p id="verdict-sub" class="verdict-sub"></p>
+            <div id="verdict-meta" class="verdict-meta"></div>
+          </div>
+        </div>
+        <div class="scores" id="scores"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div><h3>근거 ① 시간에 따른 이상도</h3><p>2초 창(1초 간격)마다 같은 방식으로 낸 디퓨전 이상도(z)를 겹쳐 그림. 0 = 진짜 음성 평균. 판정은 파일 전체로 한다</p></div>
+          <div class="controls">
+            <div class="seg" id="view-seg">
+              <button data-view="all" class="on">t 평균</button><button data-view="0">t=100</button><button data-view="1">t=300</button><button data-view="2">t=500</button>
+            </div>
+            <label class="toggle"><input type="checkbox" id="overlay-toggle" checked>Mel 위에 색 표시</label>
+          </div>
+        </div>
+        <audio id="player" controls></audio>
+        <div class="viewer">
+          <canvas id="viewer" height="360"></canvas>
+          <div id="tooltip" class="tooltip"></div>
+        </div>
+        <div class="legend">
+          <span><i style="background:rgba(220,38,38,.55)"></i>진짜 음성보다 오차가 큼</span>
+          <span><i style="background:rgba(37,99,235,.5)"></i>진짜 음성보다 오차가 작음</span>
+          <span><i style="background:rgba(220,38,38,.14);border:1px solid rgba(220,38,38,.35)"></i>구간 기준을 넘은 2초 구간</span>
+        </div>
+        <p class="hint">아래 Mel 그림은 위치를 찾기 쉽게 깔아 둔 배경이며 모델 입력이 아닙니다. 모델은 XLS-R 특징을 보며, 이 특징에는 주파수 축이 없어 "어느 주파수가 이상한지"는 말할 수 없습니다. 그림을 클릭하면 그 위치부터 재생합니다.</p>
+      </section>
+
+      <div class="grid2">
+        <section class="card">
+          <div class="card-head"><div><h3>근거 ② 노이즈 단계별 차이</h3><p>t별 구간 오차의 z-점수 평균</p></div></div>
+          <div id="t-bars"></div>
+          <p class="hint">t가 작을수록 원본이 많이 남은 상태(세부), 클수록 노이즈가 많이 섞인 상태(큰 구조)에서 본 차이입니다. 음수는 진짜 음성보다 오차가 작다는 뜻이며, 지나치게 매끄러운 합성 음성에서 나타날 수 있습니다.</p>
+        </section>
+        <section class="card">
+          <div class="card-head"><div><h3>근거 ③ 분포 거리 기여</h3><p>진짜 음성 분포와의 거리(Mahalanobis)를 이룬 특징</p></div><div class="big-num" id="maha-head"></div></div>
+          <div id="maha-bars"></div>
+          <p class="hint">오차가 크든 작든 진짜 음성의 "보통 모양"에서 벗어나면 거리가 커집니다. 기여율은 거리²에서 각 특징이 차지하는 몫입니다.</p>
+        </section>
+      </div>
+
+      <div class="grid2">
+        <section class="card"><div class="card-head"><h3>판단 요약</h3></div><ol id="summary" class="summary"></ol></section>
+        <section class="card"><div class="card-head"><h3>입력 점검</h3></div><ul id="notes" class="notes"></ul></section>
+      </div>
+
+      <div class="record" id="record"></div>
+    </div>
+
+    <!-- 3. 보고서 -->
+    <div class="section-head"><span class="step">3</span><h2>XAI 보고서</h2></div>
+    <section class="card report-card">
+      <div>
+        <p style="margin:0 0 14px;color:var(--ink2)">판정, 근거 세 가지, 입력 점검, 방법, 개인정보 처리 기록을 한 문서로 정리합니다. 보고서는 이 브라우저 안에서만 만들어지며 서버로 보내지 않습니다.</p>
+        <div class="opts">
+          <label><input type="checkbox" id="opt-name"><span>파일 이름 넣기<small>기본값은 넣지 않음. 파일 이름에 이름·전화번호가 들어 있는 경우가 많습니다.</small></span></label>
+          <label><input type="checkbox" id="opt-hash"><span>파일 지문(SHA-256) 넣기<small>보고서가 어떤 파일에 대한 것인지 나중에 확인할 때 씁니다. 원본을 가진 사람만 대조할 수 있습니다.</small></span></label>
+          <label><input type="checkbox" id="opt-mel"><span>Mel 그림 넣기<small>그림에서 말소리 일부를 다시 만들어 낼 수 있어 기본값은 넣지 않음</small></span></label>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn primary" id="report-open"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M7 3h7l5 5v13H7zM14 3v5h5M10 13h6M10 17h6"/></svg>보고서 미리보기</button>
+        <button class="btn" id="report-print"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M7 8V3h10v5M7 17H4V9h16v8h-3M7 14h10v7H7z"/></svg>PDF로 저장</button>
+        <button class="btn" id="report-download"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>HTML로 내려받기</button>
+      </div>
+    </section>
+  </div>
+
+  <footer>
+    이 결과는 진짜 음성만으로 학습한 모델이 계산한 '낯섦' 점수이며, 확률이나 확정 판정이 아닙니다. 녹음 환경·압축 형식이 학습 데이터와 다르면 진짜 음성도 점수가 높게 나올 수 있습니다. 법적 증거로 단독 사용하지 마세요.
+  </footer>
+</main>
+
+<!-- 개인정보 처리 안내 -->
+<dialog id="privacy-dialog">
+  <div class="dlg-head"><h2>개인정보 처리 안내</h2><button class="btn ghost" id="privacy-close">닫기</button></div>
+  <div class="dlg-body">
+    <dl>
+      <dt>처리하는 정보</dt>
+      <dd>올리거나 녹음한 음성 내용과 파일 확장자. 파일 이름은 서버로 보내지 않습니다. 서버는 접속 기록(IP 주소, 요청 주소)을 남기지 않습니다.</dd>
+      <dt>목적</dt>
+      <dd>딥보이스(합성 음성) 여부 판별과 판단 근거 설명. 화자를 식별하거나 모델 학습에 쓰지 않습니다.</dd>
+      <dt>처리 방식</dt>
+      <dd>음성은 분석 서버의 메모리에서만 처리하고 디스크에 저장하지 않습니다. 단, 일부 m4a·mp4 파일처럼 메모리에서 바로 읽을 수 없는 경우에만 디코딩 중에 임시 파일을 만들고 읽자마자 삭제합니다. 임시 파일을 썼는지는 결과와 보고서에 표시됩니다.</dd>
+      <dt>보관 기간</dt>
+      <dd>서버: 보관하지 않음(응답 직후 파기). 브라우저: 결과는 이 탭의 메모리에만 있으며, '결과 지우기'를 누르거나 탭을 닫으면 사라집니다. 브라우저 저장소(쿠키, localStorage)는 쓰지 않습니다.</dd>
+      <dt>제3자 제공·외부 전송</dt>
+      <dd>없음. 이 화면은 외부 글꼴·스크립트·분석 도구를 불러오지 않으며, 보안 설정으로 분석 서버 외의 곳에는 연결할 수 없습니다.</dd>
+      <dt>보고서</dt>
+      <dd>사용자가 요청할 때 이 브라우저 안에서 만들어집니다. 파일 이름, 파일 지문, Mel 그림은 기본값으로 빠져 있으며 직접 선택할 때만 들어갑니다. 내려받은 보고서는 사용자가 직접 관리하고, 필요 없어지면 삭제하세요.</dd>
+      <dt>이용자의 권리</dt>
+      <dd>동의하지 않을 수 있으며, 동의하지 않으면 분석만 할 수 없습니다. 서버에 남는 정보가 없으므로 별도의 열람·삭제 요청 절차는 필요하지 않습니다.</dd>
+    </dl>
+    <div class="note">음성은 특정 개인을 알아볼 수 있는 정보입니다. 이 데모를 다른 사람이 쓰도록 공개하려면 HTTPS 적용, 접근 통제, 기관의 개인정보 처리방침 검토가 필요합니다.</div>
+  </div>
+</dialog>
+
+<!-- 보고서 미리보기 -->
+<div id="report-overlay" class="overlay" hidden>
+  <div class="overlay-bar">
+    <span class="title">XAI 보고서 미리보기</span>
+    <button class="btn" id="ov-print">PDF로 저장</button>
+    <button class="btn" id="ov-download">HTML로 내려받기</button>
+    <button class="btn ghost" id="ov-close">닫기</button>
+  </div>
+  <div class="overlay-scroll"><article id="report-sheet" class="rpt"></article></div>
+</div>
+
+<script>
+"use strict";
+// ===============================
+// 0. 공통
+// ===============================
+const $ = (id) => document.getElementById(id);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? "–" : Number(v).toFixed(d);
+const signed = (v, d = 2) => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(d);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const DEMO = new URLSearchParams(location.search).has("demo");  // ?demo=1: 서버 없이 예시 데이터로 화면만 본다.
+
+const KEYS = ["score_rdm", "score_feature", "score_mean", "score_max", "score_maha"];
+const keysOf = (r) => KEYS.filter((k) => r.scores[k] !== undefined);  // 이 결과에 들어 있는 점수만 (RDM이면 1가지)
+const KEY_INFO = {
+  score_rdm: { name: "디퓨전 이상도", desc: "XLS-R 파일 벡터에 섞은 노이즈를 진짜 음성만 배운 디퓨전이 얼마나 못 맞히는지 (z)" },
+  score_feature: { name: "특징 거리", desc: "XLS-R 특징이 진짜 음성 범위에서 떨어진 정도 (디퓨전 없음)" },
+  score_mean: { name: "평균 이상도", desc: "디퓨전: 구간 z-점수의 평균" },
+  score_max: { name: "최대 구간 이상도", desc: "디퓨전: 가장 의심스러운 2초 구간" },
+  score_maha: { name: "분포 거리", desc: "디퓨전: 오차 분포와의 Mahalanobis 거리" },
+};
+const C = { ink: "#111827", muted: "#6b7280", faint: "#9ca3af", line: "#e5e7eb", grid: "#eef0f3", spoof: "#dc2626", real: "#15803d", low: "#2563eb", accent: "#4338ca" };
+
+const state = {
+  result: null, blob: null, fileName: null, source: null,
+  view: "all", overlay: true, hover: null,
+  curves: {}, ranges: {}, mel: null, overlays: {},
+  audioUrl: null, info: null, maxSec: 30, maxMb: 20,
+};
+
+// ===============================
+// 1. 서버 정보
+// ===============================
+async function checkServer() {
+  const chip = $("model-chip");
+  if (DEMO) { chip.textContent = "예시 데이터 (서버 없음)"; chip.className = "chip demo"; return; }
+  try {
+    const res = await fetch("/api/info", { cache: "no-store" });
+    if (!res.ok) throw new Error();
+    const info = await res.json();
+    state.info = info;
+    state.maxSec = info.max_audio_sec;
+    state.maxMb = info.max_upload_mb;
+    chip.textContent = info.model.feature_type === "xlsr" ? `XLS-R + 디퓨전(RDM) · ${info.model.run_name}` : info.model.feature_train_desc ? `XLS-R 특징 거리 · 영어+한국어` : `${info.model.feature_type === "wavlm" ? "WavLM" : info.model.feature_type} · ${info.model.run_name} · epoch ${info.model.checkpoint_epoch}`;
+    chip.className = "chip ok";
+    $("drop-hint").textContent = `wav · flac · mp3 · m4a · ogg · webm · 최대 ${info.max_upload_mb}MB · 앞 ${info.max_audio_sec}초 분석`;
+  } catch {
+    chip.textContent = "분석 서버에 연결되지 않음";
+    chip.className = "chip bad";
+  }
+}
+
+function setStatus(text, kind = "") { const el = $("status"); el.textContent = text; el.className = "status " + kind; }
+
+// ===============================
+// 2. 동의
+// ===============================
+const consentBoxes = [$("consent-process"), $("consent-owner")];
+const consented = () => consentBoxes.every((b) => b.checked);
+function updateConsent() {
+  const ok = consented();
+  $("input-card").classList.toggle("locked", !ok);
+  $("drop").setAttribute("aria-disabled", String(!ok));
+  if (!recorder) $("rec-btn").disabled = !ok || !micSupported;
+  if (ok && $("status").textContent.startsWith("먼저")) setStatus("");
+}
+consentBoxes.forEach((b) => b.addEventListener("change", updateConsent));
+function requireConsent() {
+  if (consented()) return true;
+  setStatus("먼저 위의 필수 동의 항목 두 개를 확인해 주세요.", "error");
+  return false;
+}
+
+// ===============================
+// 3. 입력: 파일
+// ===============================
+const drop = $("drop"), fileInput = $("file-input");
+drop.addEventListener("click", () => { if (requireConsent()) fileInput.click(); });
+drop.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && requireConsent()) { e.preventDefault(); fileInput.click(); } });
+fileInput.addEventListener("change", () => {
+  const file = fileInput.files[0];
+  fileInput.value = "";
+  if (file) analyze(file, file.name, "file");
+});
+["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); if (consented()) drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", (e) => {
+  if (!requireConsent()) return;
+  const file = e.dataTransfer.files[0];
+  if (file) analyze(file, file.name, "file");
+});
+
+const extOf = (name) => { const m = /\.([a-z0-9]{1,5})$/i.exec(name || ""); return m ? m[1].toLowerCase() : ""; };
+
+async function analyze(blob, fileName, source) {
+  if (!requireConsent()) return;
+  if (DEMO) { showResult(makeDemo(), blob, fileName, source); setStatus("예시 모드라서 올린 파일 대신 예시 결과를 보여 줍니다."); return; }
+  if (blob.size > state.maxMb * 1024 * 1024) { setStatus(`파일이 너무 큽니다. ${state.maxMb}MB 이하로 올려 주세요.`, "error"); return; }
+
+  const ext = source === "mic" ? "wav" : extOf(fileName);
+  const query = new URLSearchParams({ consent: "yes", source, ext });  // 파일 이름은 보내지 않는다.
+  setBusy(true);
+  setStatus("분석 중… (음성은 서버 메모리에서만 처리됩니다)", "busy");
+  const t0 = performance.now();
+  try {
+    const res = await fetch(`/api/analyze?${query}`, { method: "POST", body: blob, headers: { "Content-Type": "application/octet-stream" }, cache: "no-store" });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data && typeof data.detail === "string" ? data.detail : `서버 오류 (${res.status})`);
+    showResult(data, blob, fileName, source);
+    setStatus(`분석 완료 · ${((performance.now() - t0) / 1000).toFixed(1)}초`);
+  } catch (error) {
+    setStatus(error.message === "Failed to fetch" ? "분석 서버에 연결할 수 없습니다. python src/server.py 가 켜져 있는지 확인하세요." : error.message, "error");
+  } finally {
+    setBusy(false);
+  }
+}
+
+function setBusy(busy) {
+  drop.style.pointerEvents = busy ? "none" : "";
+  if (!recorder) $("rec-btn").disabled = busy || !consented() || !micSupported;
+}
+
+// ===============================
+// 4. 입력: 마이크 (브라우저에서 바로 wav로 만든다)
+// ===============================
+let recorder = null;
+const micSupported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+const recBtn = $("rec-btn");
+if (!micSupported) $("rec-hint").textContent = "마이크 녹음은 localhost 또는 https 주소에서만 됩니다.";
+recBtn.addEventListener("click", () => { if (recorder) stopRecording(); else if (requireConsent()) startRecording(); });
+
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },  // 브라우저 보정이 음성을 바꾸지 않도록 끈다.
+    });
+    const ctx = new AudioContext();
+    const src = ctx.createMediaStreamSource(stream);
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const chunks = [];
+    proc.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    src.connect(proc); proc.connect(ctx.destination);
+    const t0 = performance.now();
+    recorder = { stream, ctx, src, proc, chunks };
+    recorder.timer = setInterval(() => {
+      const sec = (performance.now() - t0) / 1000;
+      recBtn.querySelector("span").textContent = `녹음 중 ${sec.toFixed(1)}초 · 멈추기`;
+      if (sec >= state.maxSec) stopRecording();
+    }, 100);
+    recBtn.classList.add("recording");
+    setStatus("녹음 중입니다. 버튼을 다시 누르면 분석합니다.");
+  } catch (error) {
+    setStatus("마이크를 쓸 수 없습니다: " + error.message, "error");
+  }
+}
+
+function stopRecording(discard = false) {
+  const r = recorder;
+  if (!r) return;
+  recorder = null;
+  clearInterval(r.timer);
+  r.proc.disconnect(); r.src.disconnect();
+  r.stream.getTracks().forEach((t) => t.stop());
+  const rate = r.ctx.sampleRate;
+  r.ctx.close();
+  recBtn.classList.remove("recording");
+  recBtn.querySelector("span").textContent = "마이크로 녹음";
+  updateConsent();
+  if (discard) return;
+  const n = r.chunks.reduce((a, c) => a + c.length, 0);
+  if (n < rate * 0.6) { setStatus("녹음이 너무 짧습니다.", "error"); return; }
+  const samples = new Float32Array(n);
+  let o = 0;
+  for (const c of r.chunks) { samples.set(c, o); o += c.length; }
+  r.chunks.length = 0;
+  analyze(encodeWav(samples, rate), null, "mic");
+  samples.fill(0);
+}
+
+function encodeWav(samples, rate) {  // Float32 → 16비트 PCM wav
+  const buf = new ArrayBuffer(44 + samples.length * 2), v = new DataView(buf);
+  const w = (p, s) => { for (let i = 0; i < s.length; i++) v.setUint8(p + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + samples.length * 2, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) { const s = clamp(samples[i], -1, 1); v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true); }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+// ===============================
+// 5. 결과 보여 주기
+// ===============================
+function showResult(r, blob, fileName, source) {
+  state.result = r; state.blob = blob; state.fileName = fileName; state.source = source;
+  state.hover = null;
+  prepareCurves(r);
+  state.mel = buildMelImage(r);
+  if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
+  state.audioUrl = URL.createObjectURL(blob);
+  $("player").src = state.audioUrl;
+
+  $("result").hidden = false;
+  document.querySelectorAll("#view-seg button").forEach((b) => {  // t 버튼 이름을 모델의 t에 맞춘다.
+    if (b.dataset.view !== "all") b.textContent = `t=${r.t_contrib.timesteps[Number(b.dataset.view)]}`;
+  });
+  renderVerdict(r);
+  renderBars(r);
+  renderLists(r);
+  renderRecord(r);
+  drawAll();
+  if (!DEMO) $("result").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+const ICONS = {
+  spoof: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17v.5"/></svg>',
+  bonafide: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg>',
+};
+
+function verdictText(r) {
+  const spoof = r.verdict === "spoof";
+  return {
+    label: spoof ? "딥보이스로 의심됩니다" : "진짜 음성 범위입니다",
+    sub: spoof
+      ? `진짜 음성만 배운 모델이 이 음성을 진짜 음성의 ${r.model.threshold_percentile}%보다 더 낯설어합니다.`
+      : "진짜 음성만 배운 모델이 보기에 진짜 음성의 일반적인 범위 안에 있습니다.",
+  };
+}
+
+function renderVerdict(r) {
+  const v = verdictText(r);
+  $("verdict").className = "card verdict " + r.verdict;
+  $("verdict-icon").innerHTML = ICONS[r.verdict];
+  $("verdict-label").textContent = v.label;
+  $("verdict-sub").textContent = v.sub;
+  const flagged = keysOf(r).filter((k) => r.flags[k]).length;
+  $("verdict-meta").textContent = `판정 기준: ${KEY_INFO[r.decision_key].name} · 점수 ${keysOf(r).length}가지 중 ${flagged}가지가 임계값을 넘음 · 분석 길이 ${fmt(r.duration, 1)}초`;
+
+  $("scores").innerHTML = keysOf(r).map((k) => `
+    <div class="score-row">
+      <div class="sr-name"><b>${KEY_INFO[k].name}${k === r.decision_key ? '<em class="tag">판정 기준</em>' : ""}</b><span>${KEY_INFO[k].desc}</span></div>
+      <canvas class="sr-chart" data-key="${k}"></canvas>
+      <div class="sr-val"><b>${fmt(r.scores[k])}</b><span>임계값 ${fmt(r.thresholds[k])}<br>진짜 음성 상위 ${fmt(100 - r.percentiles[k], 0)}%</span></div>
+      <div class="flag ${r.flags[k] ? "on" : "off"}">${r.flags[k] ? "넘음" : "이하"}</div>
+    </div>`).join("");
+}
+
+function zBar(name, sub, z, max = 3) {
+  const w = clamp(Math.abs(z) / max, 0, 1) * 50;
+  const color = z >= 0 ? C.spoof : C.low;
+  return `<div class="bar-row"><div class="name">${name}<small>${sub}</small></div>
+    <div class="track center"><div class="fill" style="left:${z >= 0 ? 50 : 50 - w}%;width:${w}%;background:${color};opacity:${0.4 + 0.6 * clamp(Math.abs(z) / max, 0, 1)}"></div></div>
+    <div class="val">${signed(z)}</div></div>`;
+}
+
+function renderBars(r) {
+  const tc = r.t_contrib;
+  $("t-bars").innerHTML = tc.timesteps.map((t, j) => zBar(`t = ${t}`, `최고 구간 ${signed(tc.top_segment[j], 1)}`, tc.mean[j]))
+    .join("") + `<div class="scale"><span></span><div><span>−3</span><span>진짜 음성 평균</span><span>+3</span></div><span></span></div>`;
+
+  $("maha-bars").closest("section").hidden = !r.maha;  // RDM에는 분포 거리 근거가 없다.
+  if (!r.maha) return;
+  $("maha-head").innerHTML = `거리 <b>${fmt(r.maha.distance)}</b> / 임계값 ${fmt(r.thresholds.score_maha)}`;
+  $("maha-bars").innerHTML = r.maha.features.map((f) => {
+    const share = clamp(f.share, 0, 1);
+    const color = f.diff_sd >= 0 ? C.spoof : C.low;
+    return `<div class="bar-row"><div class="name">${esc(f.label)}<small>${f.diff_sd >= 0 ? "오차 큼" : "오차 작음"} ${signed(f.diff_sd, 1)}σ</small></div>
+      <div class="track"><div class="fill" style="left:0;width:${share * 100}%;background:${color};opacity:.85"></div></div>
+      <div class="val">기여 ${fmt(f.share * 100, 0)}%</div></div>`;
+  }).join("");
+}
+
+function renderLists(r) {
+  $("summary").innerHTML = r.summary.map((s) => `<li>${esc(s)}</li>`).join("");
+  $("notes").innerHTML = r.notes.length
+    ? r.notes.map((n) => `<li class="${n.level}"><span class="ico">${n.level === "warn" ? "!" : "i"}</span><span>${esc(n.text)}</span></li>`).join("")
+    : `<li class="ok"><span class="ico">✓</span><span>학습 데이터와 크게 다른 입력 조건은 찾지 못했습니다.</span></li>`;
+}
+
+function renderRecord(r) {
+  const p = r.privacy || {};
+  $("record").innerHTML = [
+    `<span>분석 ID <b>${esc(r.analysis_id || "-")}</b></span>`,
+    `<span>서버 저장 <b>${p.stored ? "있음" : "안 함"}</b></span>`,
+    `<span>파일 이름 전송 <b>${p.filename_received ? "있음" : "안 함"}</b></span>`,
+    `<span>임시 파일 <b>${p.temp_file_used ? "사용 후 즉시 삭제" : "사용 안 함"}</b></span>`,
+    `<span>접속 기록 <b>${p.access_log ? "있음" : "남기지 않음"}</b></span>`,
+    `<span>결과 위치 <b>이 브라우저 탭 메모리</b></span>`,
+  ].join("");
+}
+
+// ===============================
+// 6. 곡선과 그림 준비
+// ===============================
+function smooth(values, covered, win) {  // 무음(계산 안 한) 프레임을 건너뛰고 이동 평균
+  const out = new Array(values.length).fill(null), h = Math.floor(win / 2);
+  for (let i = 0; i < values.length; i++) {
+    if (!covered[i]) continue;
+    let s = 0, n = 0;
+    for (let k = i - h; k <= i + h; k++) if (k >= 0 && k < values.length && covered[k]) { s += values[k]; n++; }
+    out[i] = s / n;
+  }
+  return out;
+}
+
+function prepareCurves(r) {
+  const f = r.frames, N = f.num_frames;
+  const all = Array.from({ length: N }, (_, i) => (f.z_t[0][i] + f.z_t[1][i] + f.z_t[2][i]) / 3);
+  const raw = { all, 0: f.z_t[0], 1: f.z_t[1], 2: f.z_t[2] };
+  state.curves = {}; state.ranges = {}; state.overlays = {};
+  for (const key of Object.keys(raw)) {
+    const c = smooth(raw[key], f.covered, 5);  // 100ms
+    state.curves[key] = c;
+    const vals = c.filter((v) => v !== null);
+    const lo = Math.min(-2, ...vals), hi = Math.max(3, ...vals);
+    state.ranges[key] = [clamp(lo, -12, 0) - 0.3, clamp(hi, 0, 40) + 0.5];
+    state.overlays[key] = buildOverlay(c);
+  }
+}
+
+function buildOverlay(curve) {  // 프레임마다 색 한 칸 (N × 1 그림을 Mel 위에 늘려 붙인다)
+  const cv = document.createElement("canvas");
+  cv.width = curve.length; cv.height = 1;
+  const ctx = cv.getContext("2d"), img = ctx.createImageData(curve.length, 1);
+  curve.forEach((z, i) => {
+    let c = [0, 0, 0], a = 0;
+    if (z !== null && z > 1) { c = [220, 38, 38]; a = clamp((z - 1) / 3, 0, 1) * 0.6; }
+    else if (z !== null && z < -1) { c = [37, 99, 235]; a = clamp((-z - 1) / 3, 0, 1) * 0.5; }
+    img.data.set([c[0], c[1], c[2], Math.round(a * 255)], i * 4);
+  });
+  ctx.putImageData(img, 0, 0);
+  return cv;
+}
+
+function buildMelImage(r) {  // 화면용 Mel (회색조)
+  const m = r.display.mel_db, H = m.length, W = m[0].length;
+  const flat = m.flat().sort((a, b) => a - b);
+  const lo = flat[Math.floor(flat.length * 0.05)], hi = flat[Math.floor(flat.length * 0.995)];
+  const cv = document.createElement("canvas");
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext("2d"), img = ctx.createImageData(W, H);
+  for (let y = 0; y < H; y++) {
+    const row = m[H - 1 - y];
+    for (let x = 0; x < W; x++) {
+      const g = Math.round(18 + 215 * clamp((row[x] - lo) / (hi - lo || 1), 0, 1) ** 0.9);
+      img.data.set([g, g, g + 4, 255], (y * W + x) * 4);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv;
+}
+
+// ===============================
+// 7. 그리기 (화면·보고서 공용)
+// ===============================
+function prepareCanvas(canvas, cssH) {
+  const dpr = window.devicePixelRatio || 1, cssW = canvas.clientWidth;
+  if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+    canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(cssH * dpr); canvas.style.height = cssH + "px";
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+  return { ctx, W: cssW, H: cssH };
+}
+
+function niceStep(range, maxTicks) {
+  for (const s of [0.25, 0.5, 1, 2, 5, 10, 20]) if (range / s <= maxTicks) return s;
+  return 50;
+}
+
+function timelineLayout(W, H, showMel) {
+  const L = 58, R = W - 14, top = 8, axisH = 24, gap = 14;
+  const curveH = showMel ? Math.round((H - top - axisH - gap) * 0.42) : H - top - axisH;
+  const melTop = top + curveH + gap;
+  return { L, R, pw: R - L, top, curveH, melTop, melH: H - axisH - melTop, axisY: H - axisH, showMel };
+}
+
+function drawTimeline(ctx, W, H, o) {
+  const r = o.r, lay = timelineLayout(W, H, o.showMel), { L, R, pw, top, curveH } = lay;
+  const tmax = r.duration, xOf = (t) => L + clamp(t / tmax, 0, 1) * pw;
+  const f = r.frames, curve = state.curves[o.view], [lo, hi] = state.ranges[o.view];
+  const yOf = (v) => top + curveH - (clamp(v, lo, hi) - lo) / (hi - lo) * curveH;
+  const tOf = (i) => f.offset_sec + i * f.frame_sec;
+  ctx.font = "11px " + getComputedStyle(document.body).fontFamily;
+
+  // 구간 기준을 넘은 곳
+  ctx.fillStyle = "#fafafb"; ctx.fillRect(L, top, pw, curveH);
+  ctx.fillStyle = "rgba(220,38,38,.10)";
+  for (const [a, b] of r.flagged_intervals) ctx.fillRect(xOf(a), top, xOf(b) - xOf(a), curveH);
+
+  // 기준선
+  const y0 = yOf(0);
+  ctx.strokeStyle = "#d4d7dd"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(L, Math.round(y0) + 0.5); ctx.lineTo(R, Math.round(y0) + 0.5); ctx.stroke();
+  if (hi > 2) {
+    ctx.setLineDash([3, 3]); ctx.strokeStyle = "#e3a3a3";
+    ctx.beginPath(); ctx.moveTo(L, Math.round(yOf(2)) + 0.5); ctx.lineTo(R, Math.round(yOf(2)) + 0.5); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // 곡선 (0 위는 빨강, 아래는 파랑으로 채운다)
+  const path = new Path2D(), area = new Path2D();
+  let started = false, firstX = 0, lastX = 0;
+  curve.forEach((v, i) => {
+    if (v === null) {
+      if (started) { area.lineTo(lastX, y0); started = false; }
+      return;
+    }
+    const x = xOf(tOf(i)), y = yOf(v);
+    if (!started) { path.moveTo(x, y); area.moveTo(x, y0); area.lineTo(x, y); started = true; firstX = x; }
+    else { path.lineTo(x, y); area.lineTo(x, y); }
+    lastX = x;
+  });
+  if (started) area.lineTo(lastX, y0);
+  ctx.save(); ctx.beginPath(); ctx.rect(L, top, pw, y0 - top); ctx.clip(); ctx.fillStyle = "rgba(220,38,38,.22)"; ctx.fill(area); ctx.restore();
+  ctx.save(); ctx.beginPath(); ctx.rect(L, y0, pw, top + curveH - y0); ctx.clip(); ctx.fillStyle = "rgba(37,99,235,.20)"; ctx.fill(area); ctx.restore();
+  ctx.strokeStyle = "#374151"; ctx.lineWidth = 1.1; ctx.stroke(path);
+
+  // 세로축 글자
+  ctx.fillStyle = C.muted; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  ctx.fillText("0", L - 8, y0);
+  if (hi > 2 && Math.abs(yOf(2) - y0) > 12) ctx.fillText("+2", L - 8, yOf(2));
+  ctx.fillText(fmt(hi, 0), L - 8, top + 6);
+  ctx.save(); ctx.translate(14, top + curveH / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = "center"; ctx.fillText("이상도 z", 0, 0); ctx.restore();
+
+  // Mel 배경 + 색
+  if (lay.showMel && state.mel) {
+    const { melTop, melH } = lay, d = r.display, M = d.mel_db[0].length;
+    ctx.save(); ctx.beginPath(); ctx.rect(L, melTop, pw, melH); ctx.clip();
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(state.mel, xOf(0) - (d.frame_sec / 2) / tmax * pw, melTop, M * d.frame_sec / tmax * pw, melH);
+    if (o.overlay) {
+      ctx.drawImage(state.overlays[o.view], xOf(f.offset_sec) - (f.frame_sec / 2) / tmax * pw, melTop, f.num_frames * f.frame_sec / tmax * pw, melH);
+    }
+    ctx.restore();
+    ctx.fillStyle = "rgba(220,38,38,.85)";
+    for (const [a, b] of r.flagged_intervals) ctx.fillRect(xOf(a), melTop - 6, xOf(b) - xOf(a), 3);
+    ctx.fillStyle = C.muted; ctx.textAlign = "right";
+    const hz = d.mel_hz;
+    for (const target of [500, 1000, 2000, 4000]) {
+      let b = hz.findIndex((v) => v >= target);
+      if (b < 0) continue;
+      const y = melTop + melH - (b + 0.5) / hz.length * melH;
+      ctx.fillText(target >= 1000 ? `${target / 1000}k` : String(target), L - 8, y);
+    }
+    ctx.save(); ctx.translate(14, melTop + melH / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = "center"; ctx.fillText("Mel (배경)", 0, 0); ctx.restore();
+  }
+
+  // 시간 축
+  const step = niceStep(tmax, Math.max(4, Math.floor(pw / 70)));
+  ctx.textBaseline = "top"; ctx.fillStyle = C.muted;
+  for (let t = 0; t <= tmax + 1e-6; t += step) {
+    const x = xOf(t);
+    ctx.fillRect(Math.round(x), lay.axisY, 1, 4);
+    ctx.textAlign = x > R - 14 ? "right" : x < L + 14 ? "left" : "center";
+    ctx.fillText(step < 1 ? t.toFixed(1) : String(Math.round(t)), x, lay.axisY + 6);
+  }
+  ctx.textAlign = "right"; ctx.fillText("초", L - 8, lay.axisY + 6);
+
+  // 재생 위치, 마우스
+  const bottom = lay.showMel ? lay.melTop + lay.melH : top + curveH;
+  if (o.playhead !== null && o.playhead !== undefined) { ctx.fillStyle = C.ink; ctx.fillRect(Math.round(xOf(o.playhead)) - 1, top, 2, bottom - top); }
+  if (o.hoverX !== null && o.hoverX !== undefined) { ctx.fillStyle = "rgba(67,56,202,.55)"; ctx.fillRect(Math.round(o.hoverX), top, 1, bottom - top); }
+}
+
+function drawDist(ctx, W, H, r, key, labels) {  // dev real 점수 분포 + 임계값 + 이 파일
+  const { counts, edges } = r.reference.hists[key];
+  const score = r.scores[key], th = r.thresholds[key];
+  const padT = labels ? 28 : 6, padB = labels ? 22 : 4, L = 4, R = W - 4;
+  let x0 = Math.min(edges[0], score, th), x1 = Math.max(edges[edges.length - 1], score, th);
+  const pad = (x1 - x0) * 0.04; x0 -= pad; x1 += pad;
+  const xOf = (v) => L + (v - x0) / (x1 - x0) * (R - L), cmax = Math.max(...counts), base = H - padB;
+  ctx.fillStyle = "#d9dde3";
+  counts.forEach((c, i) => {
+    const a = xOf(edges[i]), b = xOf(edges[i + 1]), h = c / cmax * (base - padT);
+    ctx.fillRect(a, base - h, Math.max(1, b - a - 1), h);
+  });
+  ctx.fillStyle = C.line; ctx.fillRect(L, base, R - L, 1);
+  ctx.setLineDash([3, 3]); ctx.strokeStyle = C.ink; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(xOf(th), padT - 4); ctx.lineTo(xOf(th), base); ctx.stroke(); ctx.setLineDash([]);
+  const color = score > th ? C.spoof : C.real, xs = xOf(score);
+  ctx.strokeStyle = color; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(xs, padT - 4); ctx.lineTo(xs, base); ctx.stroke();
+  if (labels) {
+    const font = getComputedStyle(document.body).fontFamily;
+    ctx.font = `600 13px ${font}`; ctx.fillStyle = C.ink; ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillText(KEY_INFO[key].name, L, 2);
+    ctx.font = `11px ${font}`; ctx.fillStyle = color; ctx.textBaseline = "bottom";
+    ctx.textAlign = xs > W - 60 ? "right" : xs < 60 ? "left" : "center";
+    ctx.fillText(`이 파일 ${fmt(score)}`, xs, padT - 6);
+    ctx.fillStyle = C.muted; ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillText(`임계값 ${fmt(th)} (점선)`, L, base + 6);
+  }
+}
+
+function drawAll() {
+  const r = state.result;
+  if (!r) return;
+  const { ctx, W, H } = prepareCanvas($("viewer"), 360);
+  const player = $("player");
+  drawTimeline(ctx, W, H, {
+    r, view: state.view, overlay: state.overlay, showMel: true,
+    playhead: player.src && (player.currentTime > 0 || !player.paused) ? player.currentTime - (r.trim_offset || 0) : null,  // 재생은 원래 녹음, 그림은 앞 무음을 잘라 낸 분석 시간
+
+    hoverX: state.hover,
+  });
+  document.querySelectorAll(".sr-chart").forEach((cv) => {
+    const { ctx: c, W: w, H: h } = prepareCanvas(cv, 46);
+    drawDist(c, w, h, r, cv.dataset.key, false);
+  });
+}
+
+// 보기 바꾸기
+$("view-seg").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  state.view = b.dataset.view;
+  for (const x of $("view-seg").children) x.classList.toggle("on", x === b);
+  drawAll();
+});
+$("overlay-toggle").addEventListener("change", (e) => { state.overlay = e.target.checked; drawAll(); });
+
+// 마우스: 값 보기 / 클릭: 재생
+const viewer = $("viewer"), tooltip = $("tooltip");
+viewer.addEventListener("mousemove", (e) => {
+  const r = state.result;
+  if (!r) return;
+  const rect = viewer.getBoundingClientRect(), lay = timelineLayout(rect.width, 360, true);
+  const x = e.clientX - rect.left, y = e.clientY - rect.top, t = (x - lay.L) / lay.pw * r.duration;
+  if (t < 0 || t > r.duration || y > lay.melTop + lay.melH) { hideHover(); return; }
+  const f = r.frames, i = clamp(Math.round((t - f.offset_sec) / f.frame_sec), 0, f.num_frames - 1);
+  const z = state.curves[state.view][i];
+  const covering = r.segments.filter((s) => t >= s.start && t < s.end).map((s) => s.score);
+  const seg = covering.length ? Math.max(...covering) : null;
+  tooltip.innerHTML = `${t.toFixed(2)}초<br>이상도 z ${z === null ? "– (무음)" : signed(z)}<br>구간 점수 ${seg === null ? "–" : fmt(seg)}`;
+  tooltip.style.display = "block"; tooltip.style.left = x + "px"; tooltip.style.top = y + "px";
+  state.hover = x; drawAll();
+});
+viewer.addEventListener("mouseleave", hideHover);
+function hideHover() { tooltip.style.display = "none"; if (state.hover !== null) { state.hover = null; drawAll(); } }
+viewer.addEventListener("click", (e) => {
+  const r = state.result, player = $("player");
+  if (!r || !player.src) return;
+  const rect = viewer.getBoundingClientRect(), lay = timelineLayout(rect.width, 360, true);
+  const t = (e.clientX - rect.left - lay.L) / lay.pw * r.duration;
+  if (t < 0 || t > r.duration) return;
+  player.currentTime = t + (r.trim_offset || 0);  // 분석 시간 → 원래 녹음 시간 (앞에서 잘라 낸 무음만큼 더한다)
+  player.play().catch(() => {});
+});
+const player = $("player");
+let raf = null;
+const loop = () => { drawAll(); raf = player.paused ? null : requestAnimationFrame(loop); };
+player.addEventListener("play", () => { if (!raf) raf = requestAnimationFrame(loop); });
+player.addEventListener("seeked", drawAll);
+player.addEventListener("pause", drawAll);
+new ResizeObserver(() => drawAll()).observe(document.querySelector(".wrap"));
+
+// ===============================
+// 8. 결과 지우기 (서버에는 원래 남는 것이 없다. 브라우저에 남은 것을 지운다)
+// ===============================
+function clearAll(silent = false) {
+  if (recorder) stopRecording(true);
+  const p = $("player");
+  p.pause(); p.removeAttribute("src"); p.load();
+  if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
+  Object.assign(state, { result: null, blob: null, fileName: null, source: null, audioUrl: null, curves: {}, ranges: {}, mel: null, overlays: {}, hover: null });
+  $("result").hidden = true;
+  ["scores", "t-bars", "maha-bars", "summary", "notes", "record"].forEach((id) => { $(id).innerHTML = ""; });
+  $("report-sheet").innerHTML = "";
+  $("report-overlay").hidden = true;
+  ["opt-name", "opt-hash", "opt-mel"].forEach((id) => { $(id).checked = false; });
+  if (!silent) { setStatus("결과와 음성을 이 탭에서 지웠습니다."); window.scrollTo({ top: 0, behavior: "smooth" }); }
+}
+$("clear-btn").addEventListener("click", () => clearAll());
+window.addEventListener("pagehide", () => clearAll(true));  // 탭을 닫거나 다른 페이지로 갈 때
+
+// ===============================
+// 9. 개인정보 안내
+// ===============================
+document.querySelectorAll("[data-open-privacy]").forEach((b) => b.addEventListener("click", () => $("privacy-dialog").showModal()));
+$("privacy-close").addEventListener("click", () => $("privacy-dialog").close());
+
+// ===============================
+// 10. XAI 보고서 (브라우저 안에서만 만든다)
+// ===============================
+const REPORT_CSS = `
+.rpt { width: 794px; max-width: 100%; margin: 0 auto; background: #fff; color: #111827; padding: 52px 60px 44px;
+  word-break: keep-all; overflow-wrap: anywhere;
+  font: 13px/1.65 "Pretendard", system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+  box-shadow: 0 2px 12px rgba(0,0,0,.08); border-radius: 4px; }
+.rpt * { box-sizing: border-box; }
+.rpt .r-kicker { font-size: 11px; letter-spacing: .08em; color: #6b7280; text-transform: uppercase; }
+.rpt h1 { font-size: 22px; letter-spacing: -0.02em; margin: 4px 0 18px; }
+.rpt h2 { font-size: 14px; margin: 26px 0 10px; padding-bottom: 6px; border-bottom: 1px solid #e5e7eb; letter-spacing: -0.01em; }
+.rpt h2 span { color: #6b7280; font-weight: 500; margin-right: 6px; }
+.rpt p { margin: 6px 0; color: #374151; }
+.rpt .meta { display: grid; grid-template-columns: 96px 1fr 96px 1fr; gap: 4px 12px; font-size: 12px; padding: 12px 14px; background: #f9fafb; border-radius: 8px; }
+.rpt .meta dt { color: #6b7280; } .rpt .meta dd { margin: 0; color: #111827; word-break: break-all; }
+.rpt .verdict { margin-top: 18px; border: 1px solid; border-left-width: 5px; border-radius: 8px; padding: 14px 16px; }
+.rpt .verdict.spoof { border-color: #fecaca; border-left-color: #dc2626; background: #fffafa; }
+.rpt .verdict.bonafide { border-color: #bbf7d0; border-left-color: #15803d; background: #fbfefc; }
+.rpt .verdict b { font-size: 17px; display: block; }
+.rpt .verdict.spoof b { color: #dc2626; } .rpt .verdict.bonafide b { color: #15803d; }
+.rpt table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 8px 0; }
+.rpt th, .rpt td { border-bottom: 1px solid #eef0f3; padding: 6px 8px; text-align: left; vertical-align: top; }
+.rpt th { color: #6b7280; font-weight: 500; background: #fafafb; }
+.rpt .n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rpt .hit { color: #dc2626; font-weight: 600; } .rpt .ok { color: #15803d; font-weight: 600; }
+.rpt img { width: 100%; display: block; border: 1px solid #eef0f3; border-radius: 6px; margin: 6px 0; }
+.rpt ol, .rpt ul { margin: 6px 0; padding-left: 20px; color: #374151; } .rpt li { margin: 3px 0; }
+.rpt .cap { font-size: 11.5px; color: #6b7280; }
+.rpt .box { background: #f9fafb; border-radius: 8px; padding: 10px 14px; font-size: 12px; color: #374151; }
+.rpt section { break-inside: avoid; page-break-inside: avoid; }
+.rpt .foot { margin-top: 28px; padding-top: 10px; border-top: 1px solid #e5e7eb; font-size: 11px; color: #9ca3af; display: flex; justify-content: space-between; }
+@media print { .rpt { box-shadow: none; padding: 0; width: auto; border-radius: 0; } }
+`;
+document.head.insertAdjacentHTML("beforeend", `<style id="report-css">${REPORT_CSS}</style>`);
+
+function chartImage(w, h, draw) {  // 보고서용 그림 (2배 해상도)
+  const cv = document.createElement("canvas");
+  cv.width = w * 2; cv.height = h * 2;
+  const ctx = cv.getContext("2d");
+  ctx.scale(2, 2);
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h);
+  draw(ctx, w, h);
+  return cv.toDataURL("image/png");
+}
+
+async function sha256(blob) {
+  const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const nowText = () => new Date().toLocaleString("ko-KR", { hour12: false });
+
+async function buildReport() {
+  const r = state.result;
+  const opt = { name: $("opt-name").checked, hash: $("opt-hash").checked, mel: $("opt-mel").checked };
+  const v = verdictText(r), m = r.model, p = r.privacy || {};
+  const target = opt.name ? (state.source === "mic" ? "마이크 녹음" : (state.fileName || "-")) : "기재하지 않음";
+  let fingerprint = "기재하지 않음";
+  if (opt.hash && state.blob) {
+    try { fingerprint = await sha256(state.blob); } catch { fingerprint = "계산할 수 없음 (https 또는 localhost에서만 가능)"; }
+  }
+
+  const timeImg = chartImage(680, opt.mel ? 330 : 190, (c, w, h) => drawTimeline(c, w, h, { r, view: "all", overlay: true, showMel: opt.mel, playhead: null, hoverX: null }));
+  const distImg = chartImage(680, 110, (c, w, h) => keysOf(r).forEach((k, i, ks) => {
+    c.save(); c.translate(i * (w / ks.length) + (i ? 8 : 0), 0); drawDist(c, w / ks.length - 16, h, r, k, true); c.restore();
+  }));
+
+  const included = [opt.name && "파일 이름", opt.hash && "파일 지문(SHA-256)", opt.mel && "Mel 그림"].filter(Boolean);
+  const topSegs = [...r.segments].sort((a, b) => b.score - a.score).slice(0, 3);
+  const tRows = r.t_contrib.timesteps.map((t, j) => {
+    const z = r.t_contrib.mean[j];
+    const read = z >= 0.5 ? "진짜 음성보다 오차가 큼" : z <= -0.5 ? "진짜 음성보다 오차가 작음" : "진짜 음성과 비슷함";
+    return `<tr><td>t = ${t}</td><td class="n">${signed(z)}</td><td class="n">${signed(r.t_contrib.top_segment[j])}</td><td>${read}</td></tr>`;
+  }).join("");
+  const mRows = (r.maha ? r.maha.features : []).map((f) =>
+    `<tr><td>${esc(f.label)}</td><td class="n">${signed(f.diff_sd, 2)}σ</td><td>${f.diff_sd >= 0 ? "오차가 큰 쪽" : "오차가 작은 쪽"}</td><td class="n">${fmt(f.share * 100, 1)}%</td></tr>`).join("");
+
+  return `
+  <div class="r-kicker">Deepvoice Detection · Explainable AI Report</div>
+  <h1>딥보이스 판별 XAI 보고서</h1>
+  <dl class="meta">
+    <dt>분석 ID</dt><dd>${esc(r.analysis_id || "-")}</dd>
+    <dt>분석 일시</dt><dd>${esc(r.processed_at ? new Date(r.processed_at).toLocaleString("ko-KR", { hour12: false }) : "-")}</dd>
+    <dt>대상</dt><dd>${esc(target)}</dd>
+    <dt>보고서 작성</dt><dd>${esc(nowText())}</dd>
+    <dt>파일 지문</dt><dd style="grid-column: span 3">${esc(fingerprint)}</dd>
+    <dt>분석 길이</dt><dd>${fmt(r.duration, 2)}초${r.original_duration > r.duration + 0.01 ? ` (원래 ${fmt(r.original_duration, 1)}초${r.trim_offset !== undefined ? ", 앞뒤 무음 제외" : " 중 앞부분"})` : ""}</dd>
+    <dt>모델</dt><dd>${esc(m.run_name)} · epoch ${m.checkpoint_epoch}</dd>
+  </dl>
+
+  <section>
+    <div class="verdict ${r.verdict}"><b>${v.label}</b><p>${esc(r.summary[0])}</p></div>
+  </section>
+
+  <section>
+    <h2><span>1</span>점수와 판정</h2>
+    <table>
+      <tr><th>점수</th><th>의미</th><th class="n">값</th><th class="n">임계값</th><th class="n">진짜 음성 대비</th><th>결과</th></tr>
+      ${keysOf(r).map((k) => `<tr><td>${KEY_INFO[k].name}${k === r.decision_key ? " (판정 기준)" : ""}</td><td>${KEY_INFO[k].desc}</td>
+        <td class="n">${fmt(r.scores[k], 3)}</td><td class="n">${fmt(r.thresholds[k], 3)}</td><td class="n">상위 ${fmt(100 - r.percentiles[k], 1)}%</td>
+        <td class="${r.flags[k] ? "hit" : "ok"}">${r.flags[k] ? "임계값 넘음" : "임계값 이하"}</td></tr>`).join("")}
+    </table>
+    <img src="${distImg}" alt="진짜 음성 점수 분포와 이 파일의 위치">
+    <p class="cap">회색 막대: 개발용 진짜 음성 ${r.reference.num_dev_files}개의 점수 분포 · 점선: 임계값(진짜 음성 ${m.threshold_percentile}백분위) · 색 선: 이 파일</p>
+  </section>
+
+  <section>
+    <h2><span>2</span>판단 근거 요약</h2>
+    <ol>${r.summary.map((s) => `<li>${esc(s)}</li>`).join("")}</ol>
+  </section>
+
+  <section>
+    <h2><span>3</span>근거 ① 시간에 따른 이상도</h2>
+    <img src="${timeImg}" alt="시간에 따른 이상도">
+    <p class="cap">20ms 프레임마다 노이즈 예측 오차를 진짜 음성 기준 z-점수로 바꾸고 t 3개를 평균한 값(100ms 이동 평균). 빨강: 진짜 음성보다 오차가 큼, 파랑: 작음, 붉은 띠: 구간 기준(${fmt(r.segment_threshold)})을 넘은 2초 구간.${opt.mel ? " 아래 Mel 그림은 위치를 찾기 위한 배경이며 모델 입력이 아닙니다." : ""}</p>
+    <table>
+      <tr><th>순위</th><th>구간</th><th class="n">구간 점수</th><th class="n">t=${r.t_contrib.timesteps.join(" / t=")} z</th><th>구간 기준</th></tr>
+      ${topSegs.map((s, i) => `<tr><td>${i + 1}</td><td>${fmt(s.start, 1)}–${fmt(s.end, 1)}초</td><td class="n">${fmt(s.score)}</td><td class="n">${s.z_t.map((z) => signed(z, 1)).join(" / ")}</td><td class="${s.flagged ? "hit" : "ok"}">${s.flagged ? "넘음" : "이하"}</td></tr>`).join("")}
+    </table>
+  </section>
+
+  <section>
+    <h2><span>4</span>근거 ② 노이즈 단계별 차이</h2>
+    <table><tr><th>노이즈 단계</th><th class="n">평균 z</th><th class="n">최고 구간 z</th><th>해석</th></tr>${tRows}</table>
+    <p class="cap">t가 작을수록 원본이 많이 남은 상태(세부), 클수록 노이즈가 많이 섞인 상태(큰 구조)에서의 차이입니다. 음수는 진짜 음성보다 오차가 작다는 뜻이며, 지나치게 매끄러운 합성 음성에서 나타날 수 있습니다.</p>
+  </section>
+
+  ${r.maha ? `<section>
+    <h2><span>5</span>근거 ③ 분포 거리 기여</h2>
+    <p>진짜 음성 분포와의 거리 ${fmt(r.maha.distance, 3)} (임계값 ${fmt(r.thresholds.score_maha, 3)})</p>
+    <table><tr><th>특징</th><th class="n">진짜 음성 평균과의 차이</th><th>방향</th><th class="n">거리² 기여율</th></tr>${mRows}</table>
+    <p class="cap">특징 = 파일 평균 오차의 log. 기여율은 거리²를 특징별로 나눈 몫이며, 특징끼리 상관이 있으면 음수가 나올 수 있습니다.</p>
+  </section>` : ""}
+
+  <section>
+    <h2><span>6</span>입력 조건 점검</h2>
+    ${r.notes.length ? `<ul>${r.notes.map((n) => `<li>${n.level === "warn" ? "[주의] " : ""}${esc(n.text)}</li>`).join("")}</ul>` : "<p>학습 데이터와 크게 다른 입력 조건은 찾지 못했습니다.</p>"}
+    <p class="cap">원래 형식 ${esc(r.quality.format || "-")} · ${r.quality.sample_rate ? r.quality.sample_rate + " Hz" : "샘플레이트 모름"} · 무음 비율 ${fmt(r.quality.silence_ratio * 100, 0)}% · 클리핑 ${fmt(r.quality.clip_ratio * 100, 2)}%</p>
+  </section>
+
+  <section>
+    <h2><span>7</span>방법</h2>
+    <div class="box">
+      ${m.feature_type === "xlsr" ? `<p><b>판정</b> · 음성의 앞뒤 무음을 자르고 소리 크기를 맞춘 뒤, 사전학습 음성 모델 XLS-R(고정, 학습하지 않음)의 ${esc(m.feature)}를 만듭니다. 진짜 음성 벡터만으로 학습한 ${esc(m.network)}이 이 벡터에 섞은 노이즈를 t=${m.score_timesteps.join(", ")} 단계에서 얼마나 못 맞히는지(진짜 음성 기준 z의 평균)가 디퓨전 이상도이며, 판정은 디퓨전이 합니다. 학습 데이터: ${esc(m.train_data)}, bona fide만.</p>
+      <p><b>임계값</b> · 개발용 진짜 음성(${esc(m.dev_data)}) ${m.num_dev_files}개 점수의 ${m.threshold_percentile}백분위. 가짜 음성은 학습·임계값 어디에도 쓰지 않았습니다.</p>
+      <p><b>설명 방식</b> · 시간 근거는 같은 계산을 2초 창마다 따로 한 값이며(창 기준은 개발용 진짜 음성의 창으로 따로 정함), 노이즈 단계 근거는 파일 점수를 이루는 t별 z입니다. 별도의 설명 모델은 없습니다.</p>` : ""}
+      ${m.feature_type !== "xlsr" && m.feature_train_desc ? `<p><b>판정</b> · ${esc(m.feature)}의 파일 평균이 진짜 음성 무리에서 얼마나 떨어졌는지(마할라노비스 거리)로 판정합니다. 진짜 음성 무리: ${esc(m.feature_train_desc)} (${m.feature_num_real.toLocaleString()}개). 임계값은 개발용 진짜 음성 점수의 ${m.feature_threshold_percentile}백분위입니다. 가짜 음성은 쓰지 않았습니다. 아래 디퓨전 점수와 시간축 그림은 어느 구간이 이상한지 보여 주는 설명용입니다.</p>` : ""}
+      ${m.feature_type === "xlsr" ? "" : `<p><b>${m.feature_train_desc ? "설명용 모델" : "모델"}</b> · ${esc(m.feature)}을 입력으로 쓰는 ${esc(m.network)}. 학습에는 진짜 음성(${esc(m.train_data)} bona fide)만 썼으며 가짜 음성은 보지 않았습니다${m.codec_augment ? " (전화 코덱 증강 포함)" : ""}.</p>
+      <p><b>점수</b> · 음성을 2초 창·1초 간격으로 자르고, 고정 노이즈를 t=${m.score_timesteps.join(", ")} 단계로 섞은 뒤 모델이 그 노이즈를 얼마나 잘 맞히는지(예측 오차)를 잽니다. 진짜 음성으로 배운 모델은 진짜 음성의 노이즈를 잘 맞히므로, 오차가 진짜 음성과 다르면 낯선 음성으로 봅니다.</p>
+      <p><b>임계값</b> · 개발용 진짜 음성(${esc(m.dev_data)}) ${m.num_dev_files}개 점수의 ${m.threshold_percentile}백분위. 진짜 음성의 약 ${100 - m.threshold_percentile}%는 임계값을 넘도록 정한 값입니다.</p>
+      <p><b>설명 방식</b> · 점수를 만든 노이즈 예측 오차를 시간(프레임), 노이즈 단계(t), 분포 거리 특징별로 나눠 보여 줍니다. 별도의 설명 모델을 붙인 것이 아니라 판정에 쓴 값 자체를 분해한 것입니다.</p>`}
+    </div>
+  </section>
+
+  <section>
+    <h2><span>8</span>해석 시 유의사항</h2>
+    <ul>
+      <li>점수는 '진짜 음성과 얼마나 다른가'를 나타내며, 가짜일 확률이 아닙니다.</li>
+      <li>녹음 장비·압축 형식·잡음이 학습 데이터와 다르면 진짜 음성도 임계값을 넘을 수 있습니다(오탐). 6번 입력 조건 점검을 함께 보세요.</li>
+      <li>임계값은 진짜 음성의 약 ${100 - m.threshold_percentile}%를 잘못 의심하도록 정해져 있습니다.</li>
+      <li>모델 설정 일부는 공개 평가 데이터 결과를 참고해 정했으므로, 다른 환경에서는 성능이 다를 수 있습니다.</li>
+      <li>이 보고서는 판단을 돕는 참고 자료이며, 법적 증거로 단독 사용할 수 없습니다.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span>9</span>개인정보 처리 기록</h2>
+    <table>
+      <tr><td>처리 동의</td><td>분석 전 이용자가 두 가지 필수 항목에 동의함 (동의 기록은 저장하지 않음)</td></tr>
+      <tr><td>원본 음성</td><td>서버 메모리에서만 처리, 저장 안 함, 응답 직후 파기</td></tr>
+      <tr><td>임시 파일</td><td>${p.temp_file_used ? "디코딩에 사용 후 즉시 삭제" : "사용 안 함"}</td></tr>
+      <tr><td>파일 이름</td><td>서버로 보내지 않음</td></tr>
+      <tr><td>접속 기록</td><td>${p.access_log ? "있음" : "남기지 않음"}</td></tr>
+      <tr><td>처리 위치</td><td>${esc(p.processing_location || "-")} (외부 서비스 전송 없음)</td></tr>
+      <tr><td>보고서 포함 항목</td><td>${included.length ? esc(included.join(", ")) : "개인을 알아볼 수 있는 항목 없음 (점수와 설명만)"}</td></tr>
+    </table>
+    <p class="cap">이 보고서 파일은 작성자가 직접 관리해야 하며, 필요 없어지면 삭제하세요.</p>
+  </section>
+
+  <div class="foot"><span>딥보이스 판별 XAI 보고서 · ${esc(r.analysis_id || "")}</span><span>Real-only Diffusion</span></div>`;
+}
+
+async function openReport() {
+  if (!state.result) return;
+  $("report-sheet").innerHTML = await buildReport();
+  $("report-overlay").hidden = false;
+  document.body.style.overflow = "hidden";
+}
+function closeReport() { $("report-overlay").hidden = true; document.body.style.overflow = ""; }
+async function printReport() { await openReport(); setTimeout(() => window.print(), 100); }
+async function downloadReport() {
+  if (!state.result) return;
+  const body = await buildReport();
+  const html = `<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>딥보이스 판별 XAI 보고서 ${esc(state.result.analysis_id || "")}</title><style>body{margin:0;background:#eef0f3;padding:24px 12px}${REPORT_CSS}@media print{body{background:#fff;padding:0}}</style></head><body><article class="rpt">${body}</article></body></html>`;
+  const url = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = `deepvoice_report_${state.result.analysis_id || "result"}.html`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+$("report-open").addEventListener("click", openReport);
+$("report-print").addEventListener("click", printReport);
+$("report-download").addEventListener("click", downloadReport);
+$("ov-print").addEventListener("click", () => window.print());
+$("ov-download").addEventListener("click", downloadReport);
+$("ov-close").addEventListener("click", closeReport);
+window.addEventListener("beforeprint", () => document.body.classList.toggle("printing-report", !$("report-overlay").hidden));  // 미리보기가 열려 있을 때만 보고서만 인쇄
+window.addEventListener("afterprint", () => document.body.classList.remove("printing-report"));
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("report-overlay").hidden) closeReport(); });
+
+// ===============================
+// 11. 예시 데이터 (?demo=1). 화면 구성을 보기 위한 가짜 값이다.
+// ===============================
+function makeDemo() {
+  let seed = 11;
+  const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+  const gauss = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+  const sr = 16000, dur = 6.2, L = Math.floor(dur * sr), fs = 0.02;
+  const N = 1 + Math.floor((L - 400) / 320), M = 1 + Math.floor(L / 320);
+  const speech = (t) => (t > 0.35 && t < 5.85) && Math.sin(t * 11) > -0.75;
+  const covered = Array.from({ length: N }, (_, i) => (speech(0.0125 + i * fs) ? 1 : 0));
+  const bump = (t, a, b) => (t > a && t < b ? Math.sin(Math.PI * (t - a) / (b - a)) : 0);
+  const zt = [0, 1, 2].map((j) => Array.from({ length: N }, (_, i) => {
+    if (!covered[i]) return 0;
+    const t = 0.0125 + i * fs;
+    const v = gauss() * 0.9 + [5.2, 3.8, 1.4][j] * bump(t, 1.9, 3.8) - [0, 0.4, 1.8][j] * bump(t, 4.3, 5.2);
+    return Math.round(v * 100) / 100;
+  }));
+  const segments = [];
+  for (let s = 0; s < N; s += 50) {
+    const e = Math.min(s + 101, N);
+    if (e - s < 51) break;
+    const z = [0, 1, 2].map((j) => { let a = 0, n = 0; for (let i = s; i < e; i++) if (covered[i]) { a += zt[j][i]; n++; } return n ? a / n * 0.9 : 0; });
+    const score = (z[0] + z[1] + z[2]) / 3;
+    segments.push({ start: +(s * fs).toFixed(3), end: +Math.min(s * fs + 2, dur).toFixed(3), score, z_t: z, flagged: score > 1.2 });
+    if (s + 101 >= N) break;
+  }
+  const merged = [];
+  for (const s of segments.filter((x) => x.flagged)) {
+    if (merged.length && s.start <= merged[merged.length - 1][1]) merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], s.end);
+    else merged.push([s.start, s.end]);
+  }
+  const ss = segments.map((s) => s.score);
+  const scores = { score_mean: ss.reduce((a, b) => a + b, 0) / ss.length, score_max: Math.max(...ss), score_maha: 3.41 };
+  const thresholds = { score_mean: 0.48, score_max: 1.2, score_maha: 2.35 };
+  const hist = (mu, sd, lo, hi) => {
+    const edges = Array.from({ length: 41 }, (_, i) => lo + (hi - lo) * i / 40);
+    const counts = edges.slice(0, 40).map((e) => Math.round(220 * Math.exp(-(((e + (hi - lo) / 80 - mu) / sd) ** 2) / 2)));
+    return { counts, edges };
+  };
+  const hists = { score_mean: hist(-0.25, 0.42, -1.6, 1.6), score_max: hist(0.35, 0.5, -0.9, 2.6), score_maha: hist(1.4, 0.55, 0.1, 3.8) };
+  const pct = (k) => { const h = hists[k], tot = h.counts.reduce((a, b) => a + b, 0); return 100 * h.counts.reduce((a, c, i) => a + (h.edges[i + 1] <= scores[k] ? c : 0), 0) / tot; };
+  const demoKeys = KEYS.filter((k) => k in scores);  // 예시 결과에는 디퓨전 점수 3가지만 있다.
+  const percentiles = Object.fromEntries(demoKeys.map((k) => [k, pct(k)]));
+  const flags = Object.fromEntries(demoKeys.map((k) => [k, scores[k] > thresholds[k]]));
+  const tMean = [0, 1, 2].map((j) => segments.reduce((a, s) => a + s.z_t[j], 0) / segments.length);
+  const top = segments[ss.indexOf(scores.score_max)];
+  const melHz = Array.from({ length: 64 }, (_, i) => { const mm = 2595 * Math.log10(1 + 8000 / 700) * (i + 1) / 65; return Math.round(700 * (10 ** (mm / 2595) - 1)); });
+  const mel = melHz.map((hz) => Array.from({ length: M }, (_, x) => {
+    const t = x * fs, e = speech(t) ? 0.55 + 0.45 * Math.sin(t * 3.1) : 0, f0 = 130 + 25 * Math.sin(t * 1.7);
+    const harm = hz < 3500 ? Math.cos(Math.PI * hz / f0) ** 8 : 0.25;
+    return Math.round(-92 + e * (55 * Math.exp(-hz / 2300) + 16 * harm + 10) + gauss() * 3);
+  }));
+  const r = {
+    analysis_id: "demo00a1b2c3", processed_at: new Date().toISOString(),
+    verdict: flags.score_mean ? "spoof" : "bonafide", decision_key: "score_mean",
+    score: scores.score_mean, threshold: thresholds.score_mean, percentile: percentiles.score_mean,
+    scores, thresholds, percentiles, flags, duration: dur, original_duration: dur, segment_sec: 2, segment_threshold: thresholds.score_max,
+    segments, flagged_intervals: merged,
+    frames: { frame_sec: fs, offset_sec: 0.0125, num_frames: N, z_t: zt, covered },
+    t_contrib: { timesteps: [100, 300, 500], mean: tMean, top_segment: top.z_t },
+    maha: { distance: scores.score_maha, features: [
+      { label: "t=100", diff_sd: 1.9, contribution: 4.1, share: 0.35 },
+      { label: "t=300", diff_sd: 1.2, contribution: 1.6, share: 0.14 },
+      { label: "t=500", diff_sd: -2.3, contribution: 5.9, share: 0.51 } ] },
+    display: { frame_sec: fs, mel_hz: melHz, mel_db: mel },
+    reference: { num_dev_files: 2548, hists },
+    model: { run_name: "wavlm_l2", feature_type: "wavlm", feature: "WavLM 2층 특징 (microsoft/wavlm-base-plus)", network: "1D U-Net 디퓨전(DDPM)", checkpoint_epoch: 42,
+      train_data: "2019_train", dev_data: "2019_dev", codec_augment: false, score_timesteps: [100, 300, 500], threshold_percentile: 95, decision_key: "score_mean", num_dev_files: 2548 },
+    quality: { duration: dur, peak: 0.71, clip_ratio: 0, silence_ratio: 0.21, sample_rate: 44100, channels: 1, format: "mp3" },
+    notes: [{ level: "info", text: "44100 Hz를 16 kHz로 낮춰 분석했습니다." }, { level: "warn", text: "손실 압축 형식(mp3)입니다. 학습 데이터(FLAC, 무손실)와 달라 진짜 음성도 점수가 높게 나올 수 있습니다." }],
+    privacy: { stored: false, filename_received: false, temp_file_used: false, access_log: false, processing_location: "127.0.0.1:8000" },
+  };
+  const spans = merged.map(([a, b]) => `${a.toFixed(1)}–${b.toFixed(1)}초`).join(", ");
+  r.summary = [
+    r.verdict === "spoof" ? `판정 기준인 평균 이상도가 임계값보다 높아(${fmt(r.score)} > ${fmt(r.threshold)}) 진짜 음성과 다른 패턴으로 판단했습니다.` : `판정 기준인 평균 이상도가 임계값 이하라서(${fmt(r.score)} ≤ ${fmt(r.threshold)}) 진짜 음성 범위 안에 있습니다.`,
+    `점수 3가지 중 ${demoKeys.filter((k) => flags[k]).length}가지가 임계값을 넘었습니다.`,
+    `개발용 진짜 음성 2548개와 비교하면 ${fmt(r.percentile, 1)}%가 이 파일보다 평균 이상도가 낮습니다.`,
+    spans ? `구간 기준(1.20)을 넘은 구간: ${spans}. 가장 높은 구간은 ${top.start.toFixed(1)}–${top.end.toFixed(1)}초(구간 점수 ${fmt(top.score)})입니다.` : "구간 기준(1.20)을 넘은 구간은 없습니다.",
+    `노이즈 단계로 보면 t=100에서 오차가 진짜 음성보다 가장 크게 벌어졌습니다(평균 z ${signed(tMean[0])}).`,
+    "분포 거리에는 t=500 특징이 가장 크게 기여했습니다(기여 51%, 진짜 음성보다 오차가 작은 방향 −2.3σ).",
+    "입력 조건 경고가 1개 있습니다. 학습 데이터와 조건이 다르면 진짜 음성도 점수가 높아질 수 있으니 '입력 점검'을 함께 보세요.",
+  ];
+  return r;
+}
+
+function demoAudio() {
+  const sr = 16000, n = Math.floor(6.2 * sr), s = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = i / sr, on = (t > 0.35 && t < 5.85) && Math.sin(t * 11) > -0.75;
+    const f0 = 130 + 25 * Math.sin(t * 1.7), e = on ? 0.55 + 0.45 * Math.sin(t * 3.1) : 0;
+    s[i] = 0.1 * e * (Math.sin(2 * Math.PI * f0 * t) + 0.5 * Math.sin(4 * Math.PI * f0 * t) + 0.25 * Math.sin(6 * Math.PI * f0 * t));
+  }
+  return encodeWav(s, sr);
+}
+
+// 시작
+updateConsent();
+checkServer();
+if (DEMO) {
+  consentBoxes.forEach((b) => { b.checked = true; });
+  updateConsent();
+  showResult(makeDemo(), demoAudio(), "예시_음성.wav", "file");
+}
+</script>
+</body>
+</html>

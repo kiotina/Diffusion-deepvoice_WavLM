@@ -187,6 +187,8 @@ SERVER_PORT = 8000  # 브라우저 주소: http://127.0.0.1:8000
 EXPLAIN_WINDOW_SEC = 2.0  # 설명용 창 길이: 이 길이의 프레임만 평균 낸 벡터로 RDM 점수를 따로 낸다.
 EXPLAIN_HOP_SEC = 1.0  # 창을 옮기는 간격
 EXPLAIN_REF_FILES = 1000  # 창 점수 기준(평균·표준편차·임계값)을 만들 dev real 파일 수 (무작위, SEED 고정). XLS-R을 다시 돌려야 해서 일부만 쓴다.
+DIST_TIMESTEPS = [50, 200]  # 웹의 "분포 거리"(참고용)에 쓸 t 두 개. 이 두 오차(z)의 조합이 dev real 무리에서 얼마나 떨어졌는지 (마할라노비스). 판정에는 쓰지 않는다.
+DISPLAY_POINTS = 1500  # 웹 산점도에 찍을 점 수 (real, fake 각각). 가짜는 EVAL_DATA의 spoof로, 화면 비교용으로만 쓴다.
 DISPLAY_N_MELS = 64  # 화면용 Mel 그림의 세로 칸 수 (모델 입력 아님)
 N_FFT = 512  # 화면용 Mel 그림의 FFT 크기 (모델 입력 아님)
 

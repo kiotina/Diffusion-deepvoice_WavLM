@@ -9,8 +9,8 @@
 # 주소
 #   GET  /              : web/index.html
 #   GET  /api/info      : 모델 정보, 임계값, 업로드 제한
-#   POST /api/analyze   : 음성 원본 바이트를 받아 판정과 설명을 돌려준다.
-#                         ?consent=yes&source=file|mic&ext=mp3  (파일 이름은 받지 않는다)
+#   POST /api/analyze   : 음성 파일 원본 바이트를 받아 판정과 설명을 돌려준다.
+#                         ?consent=yes&ext=mp3  (파일 이름은 받지 않는다. 웹은 파일 업로드만 한다)
 #
 # 개인정보 보호
 #   1. 동의(consent=yes)가 없으면 음성을 처리하지 않는다.
@@ -50,7 +50,7 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",  # 다른 사이트가 이 화면을 몰래 끼워 넣지 못하게
-    "Permissions-Policy": "microphone=(self), camera=(), geolocation=()",  # 마이크는 이 사이트에서만
+    "Permissions-Policy": "microphone=(), camera=(), geolocation=()",  # 녹음 기능이 없으므로 마이크도 막는다.
     "Content-Security-Policy": (  # 이 서버 말고 다른 곳으로는 어떤 요청도 못 나가게 (외부 글꼴·스크립트·분석 도구 없음)
         "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; "
@@ -174,7 +174,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="딥보이스 판별", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)  # 자동 문서 페이지는 끈다.
+app = FastAPI(title="딥보이스 탐지 웹 서비스", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)  # 자동 문서 페이지는 끈다.
 
 
 @app.middleware("http")
@@ -206,7 +206,7 @@ async def api_analyze(request: Request, consent: str = "", source: str = "file",
     ext = re.sub(r"[^a-z0-9]", "", ext.lower())[:5]
     if ext and ext not in ALLOWED_EXTS:
         raise HTTPException(status_code=415, detail=f"지원하지 않는 형식입니다: {ext}")
-    source = "mic" if source == "mic" else "file"
+    source = "file"  # 녹음 기능을 뺐으므로 항상 파일 업로드
 
     limit = MAX_UPLOAD_MB * 1024 * 1024
     declared = request.headers.get("content-length", "")
